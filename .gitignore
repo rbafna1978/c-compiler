@@ -1,0 +1,27 @@
+# Build output
+build/
+cmake-build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+Makefile
+Testing/
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+
+# Generated binaries
+compiler
+unit_tests
+
+# macOS
+.DS_Store
