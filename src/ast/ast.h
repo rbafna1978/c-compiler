@@ -176,4 +176,7 @@ struct ASTVisitor {
   virtual void visit(VarRef&) = 0;
 };
 
+/** Pretty-prints an AST subtree. */
+std::string prettyPrint(const ASTNode& node);
+
 }  // namespace compiler::ast

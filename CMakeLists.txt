@@ -38,7 +38,12 @@ endif()
 find_package(LLVM 17 REQUIRED CONFIG)
 find_package(GTest REQUIRED)
 find_program(FLEX_EXECUTABLE NAMES flex REQUIRED)
-find_program(BISON_EXECUTABLE NAMES bison REQUIRED)
+find_program(
+  BISON_EXECUTABLE
+  NAMES bison
+  HINTS /opt/homebrew/opt/bison/bin /usr/local/opt/bison/bin
+  REQUIRED
+)
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
@@ -86,6 +91,7 @@ llvm_map_components_to_libnames(LLVM_LIBS
 add_executable(compiler
   src/main.cpp
   src/lexer/lexer.cpp
+  src/parser/parser.cpp
   src/ast/ast.cpp
   src/sema/sema.cpp
   src/sema/symbol_table.cpp
