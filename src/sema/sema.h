@@ -18,6 +18,9 @@ class SemanticAnalyzer : public ast::ASTVisitor {
   /** Returns diagnostics accumulated during analysis. */
   const std::vector<std::string>& diagnostics() const;
 
+  /** grad(f, i, ...) calls seen by the last analyze(); consumed by the autodiff pass. */
+  const std::vector<ast::CallExpr*>& gradCalls() const { return grad_calls_; }
+
   void visit(ast::TranslationUnit&) override;
   void visit(ast::FunctionDecl&) override;
   void visit(ast::VarDecl&) override;
@@ -52,6 +55,8 @@ class SemanticAnalyzer : public ast::ASTVisitor {
   std::unordered_map<std::string, const ast::FunctionDecl*> funcs_;
   std::unordered_map<std::string, std::vector<ast::FieldDecl>> structs_;  // key: "struct X"
   std::string current_return_;
+  std::vector<ast::CallExpr*> grad_calls_;
+  void checkGrad(ast::CallExpr& call);
   std::vector<std::string> diagnostics_;
 };
 

@@ -2,6 +2,7 @@ add_executable(unit_tests
   ${CMAKE_SOURCE_DIR}/src/lexer/lexer.cpp
   ${CMAKE_SOURCE_DIR}/src/parser/parser.cpp
   ${CMAKE_SOURCE_DIR}/src/ast/ast.cpp
+  ${CMAKE_SOURCE_DIR}/src/autodiff/autodiff.cpp
   ${CMAKE_SOURCE_DIR}/src/sema/sema.cpp
   ${CMAKE_SOURCE_DIR}/src/sema/symbol_table.cpp
   ${CMAKE_SOURCE_DIR}/src/codegen/codegen.cpp
@@ -12,6 +13,7 @@ add_executable(unit_tests
   unit/test_parser.cpp
   unit/test_sema.cpp
   unit/test_codegen.cpp
+  unit/test_autodiff.cpp
 )
 
 add_dependencies(unit_tests generate_frontend)

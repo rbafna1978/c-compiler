@@ -93,6 +93,7 @@ add_executable(compiler
   src/lexer/lexer.cpp
   src/parser/parser.cpp
   src/ast/ast.cpp
+  src/autodiff/autodiff.cpp
   src/sema/sema.cpp
   src/sema/symbol_table.cpp
   src/codegen/codegen.cpp

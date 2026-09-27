@@ -31,7 +31,8 @@ bool compatible(const std::string& to, const std::string& from) {
 }
 
 bool isBuiltin(const std::string& name) {
-  return name == "matmul" || name == "transpose" || name == "sum" || name == "print";
+  return name == "matmul" || name == "transpose" || name == "sum" || name == "print" || name == "exp" ||
+         name == "log" || name == "tanh";
 }
 
 bool isLvalue(const ast::ASTNode& n) {
@@ -48,6 +49,7 @@ bool isLvalue(const ast::ASTNode& n) {
 bool SemanticAnalyzer::analyze(ast::TranslationUnit& unit) {
   diagnostics_.clear();
   funcs_.clear();
+  grad_calls_.clear();
   structs_.clear();
   symbols_ = SymbolTable();
   unit.accept(*this);
@@ -275,7 +277,43 @@ void SemanticAnalyzer::visit(ast::UnaryExpr& n) {
   }
 }
 
+// grad(f, i, a0, a1, ...): gradient of the scalar function f w.r.t. its i-th parameter at (a0, a1, ...).
+void SemanticAnalyzer::checkGrad(ast::CallExpr& n) {
+  n.expr_type.name = kErr;
+  const auto* fref = n.args.empty() ? nullptr : dynamic_cast<const ast::VarRef*>(n.args[0].get());
+  const auto it = fref != nullptr ? funcs_.find(fref->name) : funcs_.end();
+  if (it == funcs_.end()) {
+    error(n.line, "first argument of 'grad' must be a function defined earlier");
+    return;
+  }
+  const auto& params = it->second->params;
+  const auto* idx = n.args.size() < 2 ? nullptr : dynamic_cast<const ast::IntLiteral*>(n.args[1].get());
+  if (idx == nullptr || idx->value < 0 || idx->value >= static_cast<long long>(params.size())) {
+    error(n.line, "second argument of 'grad' must be a constant parameter index in [0, " +
+                      std::to_string(params.size()) + ")");
+    return;
+  }
+  if (n.args.size() != 2 + params.size()) {
+    error(n.line, "grad of '" + fref->name + "' expects " + std::to_string(params.size()) +
+                      " argument(s) after the index, got " + std::to_string(n.args.size() - 2));
+    return;
+  }
+  for (size_t i = 0; i < params.size(); ++i) {
+    const std::string t = typeOf(*n.args[2 + i]);
+    if (t != kErr && !compatible(params[i].type.name, t)) {
+      error(n.line, "argument " + std::to_string(i + 1) + " of grad(" + fref->name + "): cannot pass '" + t +
+                        "' as '" + params[i].type.name + "'");
+    }
+  }
+  n.expr_type = params[static_cast<size_t>(idx->value)].type;
+  grad_calls_.push_back(&n);
+}
+
 void SemanticAnalyzer::visit(ast::CallExpr& n) {
+  if (n.callee == "grad" && !funcs_.count("grad")) {
+    checkGrad(n);
+    return;
+  }
   std::vector<std::string> arg_types;
   for (auto& a : n.args) {
     arg_types.push_back(typeOf(*a));
@@ -389,6 +427,21 @@ std::string SemanticAnalyzer::builtinType(ast::CallExpr& n, const std::vector<st
       error(n.line, "cannot print value of type '" + arg_types[0] + "'");
     }
     return "void";
+  }
+  if (name == "exp" || name == "log" || name == "tanh") {  // elementwise, always float
+    for (const auto& t : arg_types) {
+      if (t == kErr) return kErr;
+    }
+    if (arg_types.size() != 1) {
+      error(n.line, "'" + name + "' expects 1 argument(s), got " + std::to_string(arg_types.size()));
+    } else if (isNumeric(arg_types[0])) {
+      return "float";
+    } else if (isTensor(arg_types[0])) {
+      return tensorName("float", parseTensor(arg_types[0]).dims);
+    } else {
+      error(n.line, "'" + name + "' expects a number or tensor, got '" + arg_types[0] + "'");
+    }
+    return kErr;
   }
   const size_t want = name == "matmul" ? 2 : 1;
   for (const auto& t : arg_types) {

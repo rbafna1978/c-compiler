@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "autodiff/autodiff.h"
 #include "codegen/codegen.h"
 #include "lexer/lexer.h"
 #include "optimizer/optimizer.h"
@@ -27,7 +28,8 @@ constexpr const char* kUsage =
     "  --emit-ir       Write LLVM IR (to -o, or stdout) instead of an executable\n"
     "  -O              Enable optimizations\n"
     "  --dump-tokens   Print the token stream and stop\n"
-    "  --dump-ast      Print the AST and stop\n";
+    "  --dump-ast      Print the AST and stop\n"
+    "  --dump-grad     Print the AST after autodiff (shows generated __grad_* functions) and stop\n";
 
 bool endsWith(const std::string& s, const std::string& suffix) {
   return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
@@ -49,7 +51,7 @@ int run(const std::vector<std::string>& args) {
 
 int main(int argc, char** argv) {
   std::string input, output;
-  bool emit_ir = false, optimize = false, dump_tokens = false, dump_ast = false;
+  bool emit_ir = false, optimize = false, dump_tokens = false, dump_ast = false, dump_grad = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--help") {
@@ -65,6 +67,8 @@ int main(int argc, char** argv) {
       dump_tokens = true;
     } else if (arg == "--dump-ast") {
       dump_ast = true;
+    } else if (arg == "--dump-grad") {
+      dump_grad = true;
     } else if (!arg.empty() && arg[0] == '-') {
       std::cerr << "unknown option: " << arg << "\n" << kUsage;
       return 2;
@@ -104,10 +108,14 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  compiler::sema::SemanticAnalyzer sema;
-  if (!sema.analyze(*unit)) {
-    for (const auto& d : sema.diagnostics()) std::cerr << input << ": error: " << d << "\n";
+  std::vector<std::string> diagnostics;
+  if (!compiler::autodiff::analyze(*unit, diagnostics)) {
+    for (const auto& d : diagnostics) std::cerr << input << ": error: " << d << "\n";
     return 1;
+  }
+  if (dump_grad) {
+    std::cout << compiler::ast::prettyPrint(*unit);
+    return 0;
   }
   compiler::codegen::CodeGenerator codegen(input);
   if (!codegen.generate(*unit)) {

@@ -287,6 +287,20 @@ Value* CodeGenerator::emitBuiltin(ast::CallExpr& n) {
     emitPrint(n);
     return nullptr;
   }
+  if (name == "exp" || name == "log" || name == "tanh") {  // libm's expf / logf / tanhf
+    auto* f32 = builder_.getFloatTy();
+    auto fn = module_->getOrInsertFunction(name + "f", llvm::FunctionType::get(f32, {f32}, false));
+    const std::string& t = n.args[0]->expr_type.name;
+    Value* v = eval(*n.args[0]);
+    if (!isTensor(t)) return builder_.CreateCall(fn, {convert(v, t, "float")});
+    const Shape s = parseTensor(t);
+    auto* out = entryAlloca(llvmType(n.expr_type.name), "t");
+    forRange(s.size(), [&](Value* i) {
+      Value* x = convert(loadElem(v, s.elem, i), s.elem, "float");
+      builder_.CreateStore(builder_.CreateCall(fn, {x}), elemPtr(out, "float", i));
+    });
+    return out;
+  }
   Value* a = eval(*n.args[0]);
   const std::string& at = n.args[0]->expr_type.name;
   const Shape as = parseTensor(at);
@@ -451,6 +465,10 @@ void CodeGenerator::visit(ast::VarDecl& n) {
     return;
   }
   auto* slot = entryAlloca(type, n.name);
+  if (!n.init && isTensor(n.type.name)) {  // tensors start zeroed
+    builder_.CreateMemSet(slot, builder_.getInt8(0), static_cast<uint64_t>(parseTensor(n.type.name).size()) * 4,
+                          llvm::MaybeAlign(4));
+  }
   if (n.init) {
     store(slot, n.type.name, eval(*n.init), n.init->expr_type.name);
   }
