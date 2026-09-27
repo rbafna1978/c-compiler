@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    # arm64 macOS: matches how this project is developed and documented (Homebrew's LLVM/bison
+    # paths in CMakeLists.txt are the Apple Silicon ones). A Linux job would need its own path
+    # probing for those tools; not worth adding for a project this size.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: brew install cmake llvm@17 bison googletest
+
+      - name: Configure
+        run: |
+          export PATH="$(brew --prefix bison)/bin:$PATH"
+          export CMAKE_PREFIX_PATH="$(brew --prefix llvm@17):$(brew --prefix googletest)"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Unit + integration tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Benchmark smoke test
+        # Not the numbers in BENCHMARKS.md (those need a quiet, dedicated machine) -- this just
+        # re-runs the harness's own correctness asserts (fused == unfused, tiled == naive output)
+        # as a regression check, with a couple of runs so it stays fast.
+        run: python3 benchmarks/run_benchmarks.py --runs 2 --compiler build/compiler
