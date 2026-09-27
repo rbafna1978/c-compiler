@@ -41,6 +41,7 @@ class CodeGenerator : public ast::ASTVisitor {
   void visit(ast::CallExpr&) override;
   void visit(ast::MemberExpr&) override;
   void visit(ast::ArraySubscript&) override;
+  void visit(ast::TensorLiteral&) override;
   void visit(ast::IntLiteral&) override;
   void visit(ast::FloatLiteral&) override;
   void visit(ast::CharLiteral&) override;

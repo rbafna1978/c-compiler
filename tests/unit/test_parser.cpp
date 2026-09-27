@@ -140,3 +140,34 @@ TEST(ParserTest, PrettyPrintsDistanceProgram) {
   EXPECT_NE(printed.find("VarDecl dx:int"), std::string::npos);
   EXPECT_NE(printed.find("BinaryExpr +"), std::string::npos);
 }
+
+TEST(ParserTest, ParsesTensorTypesAndLiterals) {
+  Parser parser;
+  auto unit = parser.parse(
+      "tensor<float, 2, 3> id(tensor<float, 2, 3> a) { return a; }\n"
+      "int main() { tensor<int, 2, 2> m = [[1, 2], [3, 4]]; return m[1][0]; }\n",
+      "tensor.c");
+  ASSERT_NE(unit, nullptr);
+  ASSERT_TRUE(parser.errors().empty());
+  const auto* id = findFunction(*unit, "id");
+  ASSERT_NE(id, nullptr);
+  EXPECT_EQ(id->return_type.name, "tensor<float,2,3>");
+  EXPECT_EQ(id->params[0].type.name, "tensor<float,2,3>");
+
+  const auto* main_fn = findFunction(*unit, "main");
+  const auto* decl = dynamic_cast<const VarDecl*>(main_fn->body->stmts[0].get());
+  ASSERT_NE(decl, nullptr);
+  EXPECT_EQ(decl->type.name, "tensor<int,2,2>");
+  const auto* lit = dynamic_cast<const compiler::ast::TensorLiteral*>(decl->init.get());
+  ASSERT_NE(lit, nullptr);
+  EXPECT_EQ(lit->elements.size(), 2U);
+  EXPECT_NE(compiler::ast::prettyPrint(*unit).find("TensorLiteral"), std::string::npos);
+}
+
+TEST(ParserTest, RecordsSourceLines) {
+  Parser parser;
+  auto unit = parser.parse("int main() {\n  int a = 1;\n  int b = a;\n  return b;\n}\n", "lines.c");
+  ASSERT_NE(unit, nullptr);
+  const auto* fn = findFunction(*unit, "main");
+  EXPECT_EQ(fn->body->stmts[1]->line, 3);
+}

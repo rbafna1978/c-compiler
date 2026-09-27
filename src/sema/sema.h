@@ -33,6 +33,7 @@ class SemanticAnalyzer : public ast::ASTVisitor {
   void visit(ast::CallExpr&) override;
   void visit(ast::MemberExpr&) override;
   void visit(ast::ArraySubscript&) override;
+  void visit(ast::TensorLiteral&) override;
   void visit(ast::IntLiteral&) override;
   void visit(ast::FloatLiteral&) override;
   void visit(ast::CharLiteral&) override;
@@ -44,6 +45,8 @@ class SemanticAnalyzer : public ast::ASTVisitor {
   std::string typeOf(ast::ASTNode& node);
   void checkType(const ast::TypeInfo& type, int line);
   void checkCondition(ast::ASTNode& expr, int line);
+  std::string tensorArith(int line, const std::string& op, const std::string& l, const std::string& r);
+  std::string builtinType(ast::CallExpr& call, const std::vector<std::string>& arg_types);
 
   SymbolTable symbols_;
   std::unordered_map<std::string, const ast::FunctionDecl*> funcs_;

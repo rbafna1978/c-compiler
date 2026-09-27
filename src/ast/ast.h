@@ -128,6 +128,12 @@ struct ArraySubscript : ASTNode {
   void accept(ASTVisitor& visitor) override;
 };
 
+/** Tensor literal: `[1, 2, 3]` or nested `[[1, 2], [3, 4]]`. */
+struct TensorLiteral : ASTNode {
+  std::vector<std::unique_ptr<ASTNode>> elements;
+  void accept(ASTVisitor& visitor) override;
+};
+
 struct IntLiteral : ASTNode {
   long long value = 0;
   void accept(ASTVisitor& visitor) override;
@@ -171,6 +177,7 @@ struct ASTVisitor {
   virtual void visit(CallExpr&) = 0;
   virtual void visit(MemberExpr&) = 0;
   virtual void visit(ArraySubscript&) = 0;
+  virtual void visit(TensorLiteral&) = 0;
   virtual void visit(IntLiteral&) = 0;
   virtual void visit(FloatLiteral&) = 0;
   virtual void visit(CharLiteral&) = 0;

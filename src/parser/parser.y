@@ -58,7 +58,7 @@ std::unique_ptr<compiler::ast::UnaryExpr> make_unary(
 }  // namespace
 }
 
-%token KW_INT KW_FLOAT KW_CHAR KW_VOID KW_STRUCT KW_IF KW_ELSE KW_WHILE KW_FOR KW_RETURN
+%token KW_INT KW_FLOAT KW_CHAR KW_VOID KW_STRUCT KW_IF KW_ELSE KW_WHILE KW_FOR KW_RETURN KW_TENSOR
 %token PLUS MINUS STAR SLASH PERCENT
 %token EQEQ NEQ LT GT LE GE
 %token ANDAND OROR NOT
@@ -72,6 +72,8 @@ std::unique_ptr<compiler::ast::UnaryExpr> make_unary(
 %token <std::string> IDENTIFIER STRING_LITERAL
 
 %type <compiler::ast::TypeInfo> type_specifier
+%type <std::string> tensor_elem
+%type <std::vector<long long>> dim_list
 %type <compiler::ast::ParamDecl> parameter_declaration
 %type <compiler::ast::FieldDecl> field_declaration
 
@@ -156,6 +158,7 @@ function_definition
   : type_specifier IDENTIFIER LPAREN parameter_list_opt RPAREN compound_stmt
     {
       auto fn = std::make_unique<compiler::ast::FunctionDecl>();
+      fn->line = driver.last_line;
       fn->return_type = std::move($1);
       fn->name = std::move($2);
       fn->params = std::move($4);
@@ -218,6 +221,7 @@ struct_declaration
   : KW_STRUCT IDENTIFIER LBRACE field_declaration_list RBRACE
     {
       auto st = std::make_unique<compiler::ast::StructDecl>();
+      st->line = driver.last_line;
       st->name = std::move($2);
       st->fields = std::move($4);
       $$ = std::move(st);
@@ -235,12 +239,38 @@ type_specifier
       t.name = "struct " + $2;
       $$ = std::move(t);
     }
+  | KW_TENSOR LT tensor_elem COMMA dim_list GT
+    {
+      // Canonical name, e.g. "tensor<float,2,3>"; sema parses it back into a shape.
+      compiler::ast::TypeInfo t;
+      t.name = "tensor<" + $3;
+      for (long long d : $5) {
+        t.name += "," + std::to_string(d);
+      }
+      t.name += ">";
+      $$ = std::move(t);
+    }
+  ;
+
+tensor_elem
+  : KW_INT { $$ = "int"; }
+  | KW_FLOAT { $$ = "float"; }
+  ;
+
+dim_list
+  : INT_LITERAL { $$ = {$1}; }
+  | dim_list COMMA INT_LITERAL
+    {
+      $$ = std::move($1);
+      $$.push_back($3);
+    }
   ;
 
 declaration
   : type_specifier IDENTIFIER
     {
       auto decl = std::make_unique<compiler::ast::VarDecl>();
+      decl->line = driver.last_line;
       decl->type = std::move($1);
       decl->name = std::move($2);
       $$ = std::move(decl);
@@ -248,6 +278,7 @@ declaration
   | type_specifier IDENTIFIER ASSIGN expression
     {
       auto decl = std::make_unique<compiler::ast::VarDecl>();
+      decl->line = driver.last_line;
       decl->type = std::move($1);
       decl->name = std::move($2);
       decl->init = std::move($4);
@@ -259,6 +290,7 @@ compound_stmt
   : LBRACE block_item_list RBRACE
     {
       auto compound = std::make_unique<compiler::ast::CompoundStmt>();
+      compound->line = driver.last_line;
       compound->stmts = std::move($2);
       $$ = std::move(compound);
     }
@@ -300,6 +332,7 @@ selection_stmt
   : KW_IF LPAREN expression RPAREN statement %prec LOWER_THAN_ELSE
     {
       auto node = std::make_unique<compiler::ast::IfStmt>();
+      node->line = driver.last_line;
       node->cond = std::move($3);
       node->then_branch = std::move($5);
       $$ = std::move(node);
@@ -307,6 +340,7 @@ selection_stmt
   | KW_IF LPAREN expression RPAREN statement KW_ELSE statement
     {
       auto node = std::make_unique<compiler::ast::IfStmt>();
+      node->line = driver.last_line;
       node->cond = std::move($3);
       node->then_branch = std::move($5);
       node->else_branch = std::move($7);
@@ -318,6 +352,7 @@ iteration_stmt
   : KW_WHILE LPAREN expression RPAREN statement
     {
       auto node = std::make_unique<compiler::ast::WhileStmt>();
+      node->line = driver.last_line;
       node->cond = std::move($3);
       node->body = std::move($5);
       $$ = std::move(node);
@@ -325,6 +360,7 @@ iteration_stmt
   | KW_FOR LPAREN for_init_statement opt_expression SEMICOLON opt_expression RPAREN statement
     {
       auto node = std::make_unique<compiler::ast::ForStmt>();
+      node->line = driver.last_line;
       node->init = std::move($3);
       node->cond = std::move($4);
       node->incr = std::move($6);
@@ -343,11 +379,13 @@ jump_stmt
   : KW_RETURN SEMICOLON
     {
       auto node = std::make_unique<compiler::ast::ReturnStmt>();
+      node->line = driver.last_line;
       $$ = std::move(node);
     }
   | KW_RETURN expression SEMICOLON
     {
       auto node = std::make_unique<compiler::ast::ReturnStmt>();
+      node->line = driver.last_line;
       node->value = std::move($2);
       $$ = std::move(node);
     }
@@ -361,6 +399,7 @@ expr_stmt
   | expression SEMICOLON
     {
       auto node = std::make_unique<compiler::ast::ExprStmt>();
+      node->line = driver.last_line;
       node->expr = std::move($1);
       $$ = std::move(node);
     }
@@ -456,6 +495,7 @@ postfix_expression
   | postfix_expression LPAREN argument_expression_list_opt RPAREN
     {
       auto call = std::make_unique<compiler::ast::CallExpr>();
+      call->line = driver.last_line;
       if (auto* var = dynamic_cast<compiler::ast::VarRef*>($1.get())) {
         call->callee = var->name;
       } else {
@@ -468,6 +508,7 @@ postfix_expression
   | postfix_expression LBRACKET expression RBRACKET
     {
       auto sub = std::make_unique<compiler::ast::ArraySubscript>();
+      sub->line = driver.last_line;
       sub->array = std::move($1);
       sub->index = std::move($3);
       $$ = std::move(sub);
@@ -475,6 +516,7 @@ postfix_expression
   | postfix_expression DOT IDENTIFIER
     {
       auto member = std::make_unique<compiler::ast::MemberExpr>();
+      member->line = driver.last_line;
       member->object = std::move($1);
       member->member = std::move($3);
       member->is_arrow = false;
@@ -483,6 +525,7 @@ postfix_expression
   | postfix_expression ARROW IDENTIFIER
     {
       auto member = std::make_unique<compiler::ast::MemberExpr>();
+      member->line = driver.last_line;
       member->object = std::move($1);
       member->member = std::move($3);
       member->is_arrow = true;
@@ -512,31 +555,43 @@ primary_expression
   : IDENTIFIER
     {
       auto ref = std::make_unique<compiler::ast::VarRef>();
+      ref->line = driver.last_line;
       ref->name = std::move($1);
       $$ = std::move(ref);
     }
   | INT_LITERAL
     {
       auto lit = std::make_unique<compiler::ast::IntLiteral>();
+      lit->line = driver.last_line;
       lit->value = $1;
       $$ = std::move(lit);
     }
   | FLOAT_LITERAL
     {
       auto lit = std::make_unique<compiler::ast::FloatLiteral>();
+      lit->line = driver.last_line;
       lit->value = $1;
       $$ = std::move(lit);
     }
   | CHAR_LITERAL
     {
       auto lit = std::make_unique<compiler::ast::CharLiteral>();
+      lit->line = driver.last_line;
       lit->value = static_cast<char>($1);
       $$ = std::move(lit);
     }
   | STRING_LITERAL
     {
       auto lit = std::make_unique<compiler::ast::StringLiteral>();
+      lit->line = driver.last_line;
       lit->value = std::move($1);
+      $$ = std::move(lit);
+    }
+  | LBRACKET argument_expression_list RBRACKET
+    {
+      auto lit = std::make_unique<compiler::ast::TensorLiteral>();
+      lit->line = driver.last_line;
+      lit->elements = std::move($2);
       $$ = std::move(lit);
     }
   | LPAREN expression RPAREN { $$ = std::move($2); }

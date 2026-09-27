@@ -1,5 +1,7 @@
 #include "sema/sema.h"
 
+#include <sstream>
+
 namespace compiler::sema {
 
 namespace {
@@ -11,9 +13,44 @@ bool isNumeric(const std::string& t) { return isInt(t) || t == "float"; }
 bool isPtr(const std::string& t) { return !t.empty() && t.back() == '*'; }
 bool isScalar(const std::string& t) { return isNumeric(t) || isPtr(t); }
 bool isStructName(const std::string& t) { return t.rfind("struct ", 0) == 0 && !isPtr(t); }
+
+// Tensor types are canonical strings: "tensor<float,2,3>" (element type, then dimensions).
+bool isTensor(const std::string& t) { return t.rfind("tensor<", 0) == 0 && t.back() == '>'; }
+
+struct Shape {
+  std::string elem;
+  std::vector<long long> dims;
+};
+
+Shape parseTensor(const std::string& t) {
+  Shape s;
+  std::stringstream in(t.substr(7, t.size() - 8));
+  std::string part;
+  std::getline(in, s.elem, ',');
+  while (std::getline(in, part, ',')) s.dims.push_back(std::stoll(part));
+  return s;
+}
+
+std::string tensorName(const std::string& elem, const std::vector<long long>& dims) {
+  std::string name = "tensor<" + elem;
+  for (long long d : dims) name += "," + std::to_string(d);
+  return name + ">";
+}
+
+std::string promote(const std::string& a, const std::string& b) {
+  return (a == "float" || b == "float") ? "float" : "int";
+}
+
+// Same shape required; an int tensor converts implicitly to a float tensor.
 bool compatible(const std::string& to, const std::string& from) {
+  if (isTensor(to) && isTensor(from)) {
+    const Shape a = parseTensor(to), b = parseTensor(from);
+    return a.dims == b.dims && (a.elem == b.elem || (a.elem == "float" && b.elem == "int"));
+  }
   return to == from || (isNumeric(to) && isNumeric(from));
 }
+
+bool isBuiltin(const std::string& name) { return name == "matmul" || name == "transpose" || name == "sum"; }
 
 bool isLvalue(const ast::ASTNode& n) {
   if (dynamic_cast<const ast::VarRef*>(&n) || dynamic_cast<const ast::MemberExpr*>(&n) ||
@@ -49,6 +86,11 @@ std::string SemanticAnalyzer::typeOf(ast::ASTNode& node) {
 }
 
 void SemanticAnalyzer::checkType(const ast::TypeInfo& type, int line) {
+  if (isTensor(type.name)) {
+    for (long long d : parseTensor(type.name).dims) {
+      if (d <= 0) error(line, "tensor dimensions must be positive in '" + type.name + "'");
+    }
+  }
   if (isStructName(type.name) && !structs_.count(type.name)) {
     error(line, "use of undeclared type '" + type.name + "'");
   }
@@ -198,6 +240,11 @@ void SemanticAnalyzer::visit(ast::BinaryExpr& n) {
   if (op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") {
     if (!isLvalue(*n.lhs)) {
       error(n.line, "expression is not assignable");
+    } else if (isTensor(l) && op != "=") {
+      const std::string t = tensorArith(n.line, op.substr(0, 1), l, r);
+      if (!t.empty()) {
+        compatible(l, t) ? void(n.expr_type.name = l) : bad();
+      }
     } else if (!compatible(l, r) || (op != "=" && !isNumeric(l))) {
       bad();
     } else {
@@ -209,6 +256,9 @@ void SemanticAnalyzer::visit(ast::BinaryExpr& n) {
     (isNumeric(l) && isNumeric(r)) || (isPtr(l) && l == r) ? void(n.expr_type.name = "int") : bad();
   } else if (op == "%") {
     isInt(l) && isInt(r) ? void(n.expr_type.name = "int") : bad();
+  } else if (isTensor(l) || isTensor(r)) {  // + - * / (elementwise, scalars broadcast)
+    const std::string t = tensorArith(n.line, op, l, r);
+    if (!t.empty()) n.expr_type.name = t;
   } else if (isNumeric(l) && isNumeric(r)) {  // + - * /
     n.expr_type.name = (l == "float" || r == "float") ? "float" : "int";
   } else if (op == "+" && isPtr(l) && isInt(r)) {
@@ -232,6 +282,8 @@ void SemanticAnalyzer::visit(ast::UnaryExpr& n) {
     n.expr_type.name = "int";
   } else if (n.op == "-" && isNumeric(t)) {
     n.expr_type.name = t == "float" ? "float" : "int";
+  } else if (n.op == "-" && isTensor(t)) {
+    n.expr_type.name = t;
   } else if (n.op == "&" && isLvalue(*n.operand)) {
     n.expr_type.name = t + "*";
   } else if (n.op == "*" && isPtr(t)) {
@@ -248,6 +300,10 @@ void SemanticAnalyzer::visit(ast::CallExpr& n) {
   }
   n.expr_type.name = kErr;
   auto it = funcs_.find(n.callee);
+  if (it == funcs_.end() && isBuiltin(n.callee)) {  // user definitions shadow builtins
+    n.expr_type.name = builtinType(n, arg_types);
+    return;
+  }
   if (it == funcs_.end()) {
     error(n.line, "call to undeclared function '" + n.callee + "'");
     return;
@@ -302,11 +358,108 @@ void SemanticAnalyzer::visit(ast::ArraySubscript& n) {
   if (a == kErr || i == kErr) {
     return;
   }
+  if (isTensor(a) && isInt(i)) {  // A[i] drops the leading dimension
+    const Shape s = parseTensor(a);
+    if (const auto* lit = dynamic_cast<const ast::IntLiteral*>(n.index.get());
+        lit != nullptr && (lit->value < 0 || lit->value >= s.dims[0])) {
+      error(n.line, "index " + std::to_string(lit->value) + " is out of bounds for dimension of size " +
+                        std::to_string(s.dims[0]) + " in '" + a + "'");
+    }
+    n.expr_type.name = s.dims.size() == 1 ? s.elem : tensorName(s.elem, {s.dims.begin() + 1, s.dims.end()});
+    return;
+  }
   if (!isPtr(a) || !isInt(i)) {
     error(n.line, "invalid subscript of '" + a + "' with '" + i + "'");
     return;
   }
   n.expr_type.name = a.substr(0, a.size() - 1);
+}
+
+std::string SemanticAnalyzer::tensorArith(int line, const std::string& op, const std::string& l,
+                                          const std::string& r) {
+  if (isTensor(l) && isTensor(r)) {
+    const Shape a = parseTensor(l), b = parseTensor(r);
+    if (a.dims != b.dims) {
+      error(line, "shape mismatch in '" + op + "': " + l + " vs " + r);
+      return "";
+    }
+    return tensorName(promote(a.elem, b.elem), a.dims);
+  }
+  const std::string& tensor = isTensor(l) ? l : r;
+  const std::string& scalar = isTensor(l) ? r : l;
+  if (!isNumeric(scalar)) {
+    error(line, "invalid operands '" + l + "' and '" + r + "' to '" + op + "'");
+    return "";
+  }
+  const Shape s = parseTensor(tensor);
+  return tensorName(promote(s.elem, scalar), s.dims);
+}
+
+std::string SemanticAnalyzer::builtinType(ast::CallExpr& n, const std::vector<std::string>& arg_types) {
+  const std::string& name = n.callee;
+  const size_t want = name == "matmul" ? 2 : 1;
+  for (const auto& t : arg_types) {
+    if (t == kErr) return kErr;
+  }
+  if (arg_types.size() != want) {
+    error(n.line, "'" + name + "' expects " + std::to_string(want) + " argument(s), got " +
+                      std::to_string(arg_types.size()));
+    return kErr;
+  }
+  std::vector<Shape> shapes;
+  for (size_t i = 0; i < arg_types.size(); ++i) {
+    if (!isTensor(arg_types[i])) {
+      error(n.line, "argument " + std::to_string(i + 1) + " of '" + name + "' must be a tensor, got '" +
+                        arg_types[i] + "'");
+      return kErr;
+    }
+    shapes.push_back(parseTensor(arg_types[i]));
+  }
+  if (name == "sum") return shapes[0].elem;
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    if (shapes[i].dims.size() != 2) {
+      error(n.line, "'" + name + "' requires rank-2 tensors, got '" + arg_types[i] + "'");
+      return kErr;
+    }
+  }
+  const Shape& a = shapes[0];
+  if (name == "transpose") return tensorName(a.elem, {a.dims[1], a.dims[0]});
+  const Shape& b = shapes[1];  // matmul
+  if (a.dims[1] != b.dims[0]) {
+    error(n.line, "matmul: inner dimensions differ (" + arg_types[0] + " x " + arg_types[1] + ")");
+    return kErr;
+  }
+  return tensorName(promote(a.elem, b.elem), {a.dims[0], b.dims[1]});
+}
+
+void SemanticAnalyzer::visit(ast::TensorLiteral& n) {
+  std::vector<std::string> types;
+  for (auto& e : n.elements) types.push_back(typeOf(*e));
+  n.expr_type.name = kErr;
+  for (const auto& t : types) {
+    if (t == kErr) return;
+  }
+  const bool nested = isTensor(types[0]);
+  std::string elem = "int";
+  std::vector<long long> dims = {static_cast<long long>(types.size())};
+  for (const auto& t : types) {
+    if (isTensor(t) != nested || (!nested && !isNumeric(t))) {
+      error(n.line, "tensor literal elements must be all numbers or all tensors, got '" + t + "'");
+      return;
+    }
+    if (nested) {
+      const Shape s = parseTensor(t);
+      if (dims.size() == 1) dims.insert(dims.end(), s.dims.begin(), s.dims.end());
+      else if (std::vector<long long>(dims.begin() + 1, dims.end()) != s.dims) {
+        error(n.line, "tensor literal rows have different shapes: '" + types[0] + "' vs '" + t + "'");
+        return;
+      }
+      elem = promote(elem, s.elem);
+    } else {
+      elem = promote(elem, t);
+    }
+  }
+  n.expr_type.name = tensorName(elem, dims);
 }
 
 void SemanticAnalyzer::visit(ast::IntLiteral& n) { n.expr_type.name = "int"; }

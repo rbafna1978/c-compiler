@@ -18,6 +18,7 @@ struct Token {
     KwWhile,
     KwFor,
     KwReturn,
+    KwTensor,
     Plus,
     Minus,
     Star,

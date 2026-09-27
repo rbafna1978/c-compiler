@@ -119,6 +119,7 @@ CHARLIT         \'([^\\\n]|\\[ntr\\\'\"0])\'
 "else"          { push_token(Token::Kind::KwElse, yytext, yylineno); return 1; }
 "while"         { push_token(Token::Kind::KwWhile, yytext, yylineno); return 1; }
 "for"           { push_token(Token::Kind::KwFor, yytext, yylineno); return 1; }
+"tensor"        { push_token(Token::Kind::KwTensor, yytext, yylineno); return 1; }
 "return"        { push_token(Token::Kind::KwReturn, yytext, yylineno); return 1; }
 
 "=="            { push_token(Token::Kind::EqEq, yytext, yylineno); return 1; }

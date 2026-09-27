@@ -19,6 +19,7 @@ void UnaryExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void CallExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void MemberExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void ArraySubscript::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+void TensorLiteral::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void IntLiteral::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void FloatLiteral::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void CharLiteral::accept(ASTVisitor& visitor) { visitor.visit(*this); }
@@ -167,6 +168,15 @@ void printNode(const ASTNode* node, std::ostringstream& out, int depth) {
     out << "ArraySubscript\n";
     printNode(as->array.get(), out, depth + 1);
     printNode(as->index.get(), out, depth + 1);
+    return;
+  }
+
+  if (const auto* tl = dynamic_cast<const TensorLiteral*>(node)) {
+    indent(out, depth);
+    out << "TensorLiteral\n";
+    for (const auto& e : tl->elements) {
+      printNode(e.get(), out, depth + 1);
+    }
     return;
   }
 

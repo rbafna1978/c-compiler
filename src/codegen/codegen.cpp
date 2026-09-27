@@ -3,6 +3,8 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <stdexcept>
+
 namespace compiler::codegen {
 
 using llvm::BasicBlock;
@@ -60,7 +62,12 @@ CodeGenerator::CodeGenerator(const std::string& module_name)
 
 bool CodeGenerator::generate(ast::TranslationUnit& unit) {
   diagnostics_.clear();
-  unit.accept(*this);
+  try {
+    unit.accept(*this);
+  } catch (const std::runtime_error& e) {  // features sema accepts but codegen does not lower yet
+    diagnostics_.push_back(e.what());
+    return false;
+  }
   std::string msg;
   llvm::raw_string_ostream os(msg);
   if (llvm::verifyModule(*module_, &os)) {
@@ -90,6 +97,7 @@ llvm::Type* CodeGenerator::llvmType(const std::string& t) {
   if (t == "float") return builder_.getFloatTy();
   if (t == "void") return builder_.getVoidTy();
   if (isPtr(t)) return builder_.getPtrTy();
+  if (t.rfind("tensor<", 0) == 0) throw std::runtime_error("tensor codegen is not implemented yet");
   return structs_.at(t).type;
 }
 
@@ -394,6 +402,7 @@ void CodeGenerator::visit(ast::UnaryExpr& n) {
 }
 
 void CodeGenerator::visit(ast::CallExpr& n) {
+  if (!funcs_.count(n.callee)) throw std::runtime_error("builtin '" + n.callee + "' is not implemented yet");
   const auto* decl = funcs_.at(n.callee);
   std::vector<Value*> args;
   for (size_t i = 0; i < n.args.size(); ++i) {
@@ -417,6 +426,9 @@ void CodeGenerator::visit(ast::VarRef& n) {
   value_ = builder_.CreateLoad(llvmType(n.expr_type.name), addr);
 }
 
+void CodeGenerator::visit(ast::TensorLiteral&) {
+  throw std::runtime_error("tensor codegen is not implemented yet");
+}
 void CodeGenerator::visit(ast::IntLiteral& n) { value_ = builder_.getInt32(static_cast<uint32_t>(n.value)); }
 void CodeGenerator::visit(ast::FloatLiteral& n) {
   value_ = llvm::ConstantFP::get(builder_.getFloatTy(), n.value);

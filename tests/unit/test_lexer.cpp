@@ -140,3 +140,10 @@ TEST(LexerTest, ReportsInvalidToken) {
   EXPECT_NE(lexer.errors()[0].message.find("invalid token"), std::string::npos);
   EXPECT_EQ(tokens[1].kind, Token::Kind::Invalid);
 }
+
+TEST(LexerTest, RecognizesTensorKeyword) {
+  compiler::lexer::Lexer lexer;
+  const auto tokens = lexer.tokenize("tensor<float, 2, 3> a;", "t.c");
+  EXPECT_EQ(tokens[0].kind, compiler::lexer::Token::Kind::KwTensor);
+  EXPECT_EQ(tokens[1].kind, compiler::lexer::Token::Kind::Lt);
+}

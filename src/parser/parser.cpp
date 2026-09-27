@@ -63,6 +63,8 @@ parser::symbol_type yylex(compiler::parser::ParseDriver& driver) {
       return parser::make_KW_FOR();
     case Kind::KwReturn:
       return parser::make_KW_RETURN();
+    case Kind::KwTensor:
+      return parser::make_KW_TENSOR();
 
     case Kind::Plus:
       return parser::make_PLUS();

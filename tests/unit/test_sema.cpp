@@ -77,3 +77,60 @@ TEST(SemaTest, RecordsExpressionTypes) {
   const auto* ret = dynamic_cast<compiler::ast::ReturnStmt*>(fn->body->stmts[0].get());
   EXPECT_EQ(ret->value->expr_type.name, "float");
 }
+
+TEST(SemaTensorTest, AcceptsValidTensorPrograms) {
+  EXPECT_EQ(diagnose(
+                "int main() {\n"
+                "  tensor<float, 2, 3> a = [[1, 2, 3], [4, 5, 6]];\n"
+                "  tensor<float, 3, 2> b = transpose(a);\n"
+                "  tensor<float, 2, 2> c = matmul(a, b);\n"
+                "  tensor<float, 2, 2> d = c + c * 2 - c / 4;\n"
+                "  d += c;\n"
+                "  tensor<float, 3> row = a[1];\n"
+                "  a[0][1] = 9;\n"
+                "  float s = sum(d) + row[2];\n"
+                "  return -sum(a) > 0;\n"
+                "}\n"),
+            std::vector<std::string>{});
+}
+
+TEST(SemaTensorTest, InfersTensorTypes) {
+  compiler::parser::Parser parser;
+  auto unit = parser.parse(
+      "float f(tensor<float, 4, 5> a, tensor<float, 5, 2> b) { return sum(matmul(a, b)); }", "t.c");
+  ASSERT_NE(unit, nullptr);
+  compiler::sema::SemanticAnalyzer sema;
+  ASSERT_TRUE(sema.analyze(*unit));
+  const auto* fn = dynamic_cast<compiler::ast::FunctionDecl*>(unit->decls[0].get());
+  const auto* ret = dynamic_cast<compiler::ast::ReturnStmt*>(fn->body->stmts[0].get());
+  const auto* call = dynamic_cast<compiler::ast::CallExpr*>(ret->value.get());
+  EXPECT_EQ(call->args[0]->expr_type.name, "tensor<float,4,2>");
+  EXPECT_EQ(ret->value->expr_type.name, "float");
+}
+
+TEST(SemaTensorTest, RejectsShapeErrors) {
+  const std::string h = "tensor<float, 2, 3> a; tensor<float, 3, 2> b; ";
+  expectError(h + "int main() { tensor<float, 2, 3> c = a + b; return 0; }", "shape mismatch in '+'");
+  expectError(h + "int main() { tensor<float, 2, 2> c = matmul(a, a); return 0; }", "inner dimensions differ");
+  expectError(h + "int main() { tensor<float, 2, 3> c = b; return 0; }", "cannot initialize");
+  expectError(h + "int main() { a += b; return 0; }", "shape mismatch in '+'");
+  expectError(h + "int main() { return a[2][0]; }", "out of bounds");
+  expectError("int main() { tensor<float, 2, 2> m = [[1, 2], [3]]; return 0; }", "different shapes");
+  expectError("int main() { tensor<float, 2> m = [1, [2]]; return 0; }", "all numbers or all tensors");
+  expectError("tensor<float, 0> z;", "dimensions must be positive");
+  expectError(h + "int main() { return sum(a, b); }", "'sum' expects 1 argument");
+  expectError("int main() { return sum(3); }", "must be a tensor");
+  expectError(h + "int main() { tensor<float, 2, 3> c = a % a; return 0; }", "invalid operands");
+  expectError(h + "int main() { if (a) { return 1; } return 0; }", "non-scalar");
+}
+
+TEST(SemaTensorTest, UserFunctionsShadowBuiltins) {
+  EXPECT_EQ(diagnose("int sum(int a, int b) { return a + b; } int main() { return sum(1, 2); }"),
+            std::vector<std::string>{});
+}
+
+TEST(SemaTensorTest, ReportsSourceLines) {
+  const auto diags = diagnose("int main() {\n  return 1;\n  return y;\n}\n");
+  ASSERT_FALSE(diags.empty());
+  EXPECT_NE(diags[0].find("line 3"), std::string::npos) << diags[0];
+}
