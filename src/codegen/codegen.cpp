@@ -64,8 +64,8 @@ CmpInst::Predicate predicate(const std::string& op, bool is_float, bool is_ptr) 
 
 }  // namespace
 
-CodeGenerator::CodeGenerator(const std::string& module_name)
-    : module_(std::make_unique<llvm::Module>(module_name, ctx_)), builder_(ctx_) {}
+CodeGenerator::CodeGenerator(const std::string& module_name, bool fuse, bool tile)
+    : module_(std::make_unique<llvm::Module>(module_name, ctx_)), builder_(ctx_), fuse_(fuse), tile_(tile) {}
 
 bool CodeGenerator::generate(ast::TranslationUnit& unit) {
   diagnostics_.clear();
@@ -230,24 +230,6 @@ Value* CodeGenerator::tensorOperand(Value* v, const std::string& type, Value* in
   return convert(v, type, to_elem);
 }
 
-// Emits `for (i = 0; i < n; ++i) body(i)`. The counter lives in the entry block (mem2reg cleans it up).
-void CodeGenerator::forRange(long long n, const std::function<void(Value*)>& body) {
-  auto* counter = entryAlloca(builder_.getInt32Ty(), "i");
-  builder_.CreateStore(builder_.getInt32(0), counter);
-  auto* cond_bb = BasicBlock::Create(ctx_, "loop.cond", fn_);
-  auto* body_bb = BasicBlock::Create(ctx_, "loop.body", fn_);
-  auto* end_bb = BasicBlock::Create(ctx_, "loop.end", fn_);
-  builder_.CreateBr(cond_bb);
-  builder_.SetInsertPoint(cond_bb);
-  Value* i = builder_.CreateLoad(builder_.getInt32Ty(), counter);
-  builder_.CreateCondBr(builder_.CreateICmpSLT(i, builder_.getInt32(static_cast<uint32_t>(n))), body_bb, end_bb);
-  builder_.SetInsertPoint(body_bb);
-  body(i);
-  builder_.CreateStore(builder_.CreateAdd(i, builder_.getInt32(1)), counter);
-  builder_.CreateBr(cond_bb);
-  builder_.SetInsertPoint(end_bb);
-}
-
 void CodeGenerator::assignTensor(Value* dst, const std::string& dst_type, Value* src,
                                  const std::string& src_type) {
   const Shape d = parseTensor(dst_type), s = parseTensor(src_type);
@@ -273,7 +255,7 @@ void CodeGenerator::store(Value* dst, const std::string& dst_type, Value* src, c
 Value* CodeGenerator::tensorBinary(const std::string& op, Value* l, const std::string& lt, Value* r,
                                    const std::string& rt, const std::string& result) {
   const Shape rs = parseTensor(result);
-  auto* out = entryAlloca(llvmType(result), "t");
+  auto* out = tensorAlloc(result, "t");
   forRange(rs.size(), [&](Value* i) {
     Value* v = binaryOp(op, tensorOperand(l, lt, i, rs.elem), rs.elem, tensorOperand(r, rt, i, rs.elem), rs.elem);
     builder_.CreateStore(v, elemPtr(out, rs.elem, i));
@@ -294,7 +276,7 @@ Value* CodeGenerator::emitBuiltin(ast::CallExpr& n) {
     Value* v = eval(*n.args[0]);
     if (!isTensor(t)) return builder_.CreateCall(fn, {convert(v, t, "float")});
     const Shape s = parseTensor(t);
-    auto* out = entryAlloca(llvmType(n.expr_type.name), "t");
+    auto* out = tensorAlloc(n.expr_type.name, "t");
     forRange(s.size(), [&](Value* i) {
       Value* x = convert(loadElem(v, s.elem, i), s.elem, "float");
       builder_.CreateStore(builder_.CreateCall(fn, {x}), elemPtr(out, "float", i));
@@ -315,17 +297,14 @@ Value* CodeGenerator::emitBuiltin(ast::CallExpr& n) {
     return builder_.CreateLoad(llvmType(as.elem), acc);
   }
 
-  auto at2 = [&](Value* i, long long stride, Value* j) {  // flat index i*stride + j
-    return builder_.CreateAdd(builder_.CreateMul(i, builder_.getInt32(static_cast<uint32_t>(stride))), j);
-  };
   const std::string& rt = n.expr_type.name;
   const Shape rs = parseTensor(rt);
-  auto* out = entryAlloca(llvmType(rt), "t");
 
   if (name == "transpose") {
+    auto* out = tensorAlloc(rt, "t");
     forRange(as.dims[0], [&](Value* i) {
       forRange(as.dims[1], [&](Value* j) {
-        builder_.CreateStore(loadElem(a, as.elem, at2(i, as.dims[1], j)), elemPtr(out, as.elem, at2(j, as.dims[0], i)));
+        builder_.CreateStore(loadElem(a, as.elem, flatIndex(i, as.dims[1], j)), elemPtr(out, as.elem, flatIndex(j, as.dims[0], i)));
       });
     });
     return out;
@@ -335,17 +314,23 @@ Value* CodeGenerator::emitBuiltin(ast::CallExpr& n) {
     Value* b = eval(*n.args[1]);
     const Shape bs = parseTensor(n.args[1]->expr_type.name);
     const long long m = as.dims[0], k = as.dims[1], nn = bs.dims[1];
+    constexpr long long kTileBlock = 32;
+    if (tile_ && m % kTileBlock == 0 && k % kTileBlock == 0 && nn % kTileBlock == 0 && m >= kTileBlock &&
+        k >= kTileBlock && nn >= kTileBlock) {
+      return emitTiledMatmul(a, as.elem, b, bs.elem, m, k, nn, rt, kTileBlock);
+    }
+    auto* out = tensorAlloc(rt, "t");
     auto* acc = entryAlloca(llvmType(rs.elem), "acc");
     forRange(m, [&](Value* i) {
       forRange(nn, [&](Value* j) {
         builder_.CreateStore(llvm::Constant::getNullValue(llvmType(rs.elem)), acc);
         forRange(k, [&](Value* p) {
-          Value* x = convert(loadElem(a, as.elem, at2(i, k, p)), as.elem, rs.elem);
-          Value* y = convert(loadElem(b, bs.elem, at2(p, nn, j)), bs.elem, rs.elem);
+          Value* x = convert(loadElem(a, as.elem, flatIndex(i, k, p)), as.elem, rs.elem);
+          Value* y = convert(loadElem(b, bs.elem, flatIndex(p, nn, j)), bs.elem, rs.elem);
           Value* cur = builder_.CreateLoad(llvmType(rs.elem), acc);
           builder_.CreateStore(binaryOp("+", cur, rs.elem, binaryOp("*", x, rs.elem, y, rs.elem), rs.elem), acc);
         });
-        builder_.CreateStore(builder_.CreateLoad(llvmType(rs.elem), acc), elemPtr(out, rs.elem, at2(i, nn, j)));
+        builder_.CreateStore(builder_.CreateLoad(llvmType(rs.elem), acc), elemPtr(out, rs.elem, flatIndex(i, nn, j)));
       });
     });
     return out;
@@ -384,6 +369,154 @@ void CodeGenerator::emitPrint(ast::CallExpr& n) {
       builder_.CreateCall(printf_fn, {fmt, sep, x, tail});
     });
   }
+}
+
+Value* CodeGenerator::tensorAlloc(const std::string& tensor_type, const std::string& name) {
+  const Shape s = parseTensor(tensor_type);
+  const uint64_t bytes = static_cast<uint64_t>(s.size()) * 4;
+  // ponytail: above this size a tensor moves to the heap (never freed) so a benchmark-sized
+  // matrix (e.g. 256x256 floats = 256 KiB) doesn't overflow the stack; every allocation here is a
+  // temporary or local of a batch-style, run-once-and-exit program. Upgrade to a per-call arena
+  // (free everything when the function returns) if this ever backs a long-running service.
+  constexpr uint64_t kHeapThreshold = 16384;  // 16 KiB
+  if (bytes <= kHeapThreshold) return entryAlloca(llvmType(tensor_type), name);
+  auto malloc_fn = module_->getOrInsertFunction(
+      "malloc", llvm::FunctionType::get(builder_.getPtrTy(), {builder_.getInt64Ty()}, false));
+  return builder_.CreateCall(malloc_fn, {builder_.getInt64(bytes)}, name);
+}
+
+Value* CodeGenerator::flatIndex(Value* i, long long stride, Value* j) {
+  return builder_.CreateAdd(builder_.CreateMul(i, builder_.getInt32(static_cast<uint32_t>(stride))), j);
+}
+
+// Emits `for (i = 0; i < n; i += step) body(i)`. The counter lives in the entry block (mem2reg
+// cleans it up). `step` > 1 drives the outer loops of a tiled iteration space.
+void CodeGenerator::forRange(long long n, const std::function<void(Value*)>& body, long long step) {
+  auto* counter = entryAlloca(builder_.getInt32Ty(), "i");
+  builder_.CreateStore(builder_.getInt32(0), counter);
+  auto* cond_bb = BasicBlock::Create(ctx_, "loop.cond", fn_);
+  auto* body_bb = BasicBlock::Create(ctx_, "loop.body", fn_);
+  auto* end_bb = BasicBlock::Create(ctx_, "loop.end", fn_);
+  builder_.CreateBr(cond_bb);
+  builder_.SetInsertPoint(cond_bb);
+  Value* i = builder_.CreateLoad(builder_.getInt32Ty(), counter);
+  builder_.CreateCondBr(builder_.CreateICmpSLT(i, builder_.getInt32(static_cast<uint32_t>(n))), body_bb, end_bb);
+  builder_.SetInsertPoint(body_bb);
+  body(i);
+  builder_.CreateStore(builder_.CreateAdd(i, builder_.getInt32(static_cast<uint32_t>(step))), counter);
+  builder_.CreateBr(cond_bb);
+  builder_.SetInsertPoint(end_bb);
+}
+
+// elem type of a leaf/node's expr_type: itself if scalar, its element type if a tensor.
+namespace {
+std::string elemOf(const std::string& t) { return isTensor(t) ? parseTensor(t).elem : t; }
+}  // namespace
+
+bool CodeGenerator::isFusableOp(const ast::ASTNode& e) const {
+  if (const auto* b = dynamic_cast<const ast::BinaryExpr*>(&e)) {
+    return b->op == "+" || b->op == "-" || b->op == "*" || b->op == "/";
+  }
+  if (const auto* u = dynamic_cast<const ast::UnaryExpr*>(&e)) {
+    return u->op == "-";
+  }
+  if (const auto* c = dynamic_cast<const ast::CallExpr*>(&e); c != nullptr && !funcs_.count(c->callee)) {
+    return c->callee == "exp" || c->callee == "log" || c->callee == "tanh";
+  }
+  return false;
+}
+
+// Evaluates every non-fusable leaf of `e` exactly once (a tensor's address, or a scalar's value)
+// and records it, so buildFusedElem can read each leaf many times (once per loop iteration)
+// without re-evaluating or re-running any side effects.
+void CodeGenerator::prepareFusionLeaves(ast::ASTNode& e, std::unordered_map<const ast::ASTNode*, Value*>& leaves) {
+  if (isFusableOp(e)) {
+    if (auto* b = dynamic_cast<ast::BinaryExpr*>(&e)) {
+      prepareFusionLeaves(*b->lhs, leaves);
+      prepareFusionLeaves(*b->rhs, leaves);
+      return;
+    }
+    if (auto* u = dynamic_cast<ast::UnaryExpr*>(&e)) {
+      prepareFusionLeaves(*u->operand, leaves);
+      return;
+    }
+    auto* c = static_cast<ast::CallExpr*>(&e);
+    prepareFusionLeaves(*c->args[0], leaves);
+    return;
+  }
+  leaves[&e] = eval(e);
+}
+
+// Builds the scalar value of `e` at flat index `index`, in e's own element type (its caller
+// promotes as needed) -- mirrors exactly what the per-op path (tensorOperand + binaryOp) would
+// compute for `e` alone, so fusing changes nothing about int-truncation or float-promotion order.
+Value* CodeGenerator::buildFusedElem(ast::ASTNode& e, Value* index,
+                                    const std::unordered_map<const ast::ASTNode*, Value*>& leaves) {
+  const std::string node_elem = elemOf(e.expr_type.name);
+  if (!isFusableOp(e)) {
+    Value* v = leaves.at(&e);
+    return isTensor(e.expr_type.name) ? loadElem(v, node_elem, index) : v;
+  }
+  if (auto* b = dynamic_cast<ast::BinaryExpr*>(&e)) {
+    Value* l = convert(buildFusedElem(*b->lhs, index, leaves), elemOf(b->lhs->expr_type.name), node_elem);
+    Value* r = convert(buildFusedElem(*b->rhs, index, leaves), elemOf(b->rhs->expr_type.name), node_elem);
+    return binaryOp(b->op, l, node_elem, r, node_elem);
+  }
+  if (auto* u = dynamic_cast<ast::UnaryExpr*>(&e)) {
+    Value* x = buildFusedElem(*u->operand, index, leaves);  // unary '-' preserves the element type
+    return node_elem == "float" ? builder_.CreateFNeg(x) : builder_.CreateNeg(x);
+  }
+  auto* c = static_cast<ast::CallExpr*>(&e);  // exp/log/tanh: node_elem is always "float"
+  Value* x = convert(buildFusedElem(*c->args[0], index, leaves), elemOf(c->args[0]->expr_type.name), "float");
+  auto fn = module_->getOrInsertFunction(c->callee + "f",
+                                        llvm::FunctionType::get(builder_.getFloatTy(), {builder_.getFloatTy()}, false));
+  return builder_.CreateCall(fn, {x});
+}
+
+Value* CodeGenerator::tryFuse(ast::ASTNode& n) {
+  if (!fuse_ || !isTensor(n.expr_type.name) || !isFusableOp(n)) return nullptr;
+  std::unordered_map<const ast::ASTNode*, Value*> leaves;
+  prepareFusionLeaves(n, leaves);
+  const Shape rs = parseTensor(n.expr_type.name);
+  auto* out = tensorAlloc(n.expr_type.name, "t");
+  forRange(rs.size(), [&](Value* i) { builder_.CreateStore(buildFusedElem(n, i, leaves), elemPtr(out, rs.elem, i)); });
+  return out;
+}
+
+// Classic 6-nested-loop blocked GEMM: block the reduction dimension outermost so each (i, j)
+// output cell accumulates its partial sum across k-blocks (read-modify-write on `out`), and block
+// i and j so the a/b tiles touched by an (ii, jj, kk) block stay cache-resident. Requires every
+// dimension to be a multiple of `block` (checked by the caller); this is the whole optimization,
+// so there is no partial-tile remainder path to get subtly wrong.
+Value* CodeGenerator::emitTiledMatmul(Value* a, const std::string& a_elem, Value* b, const std::string& b_elem,
+                                      long long m, long long k, long long n, const std::string& result_type,
+                                      long long block) {
+  const std::string result_elem = elemOf(result_type);
+  auto* out = tensorAlloc(result_type, "t");
+  builder_.CreateMemSet(out, builder_.getInt8(0), static_cast<uint64_t>(m * n) * 4, llvm::MaybeAlign(4));
+  forRange(k, [&](Value* kk) {
+    forRange(m, [&](Value* ii) {
+      forRange(n, [&](Value* jj) {
+        forRange(block, [&](Value* di) {
+          Value* i = builder_.CreateAdd(ii, di);
+          forRange(block, [&](Value* dj) {
+            Value* j = builder_.CreateAdd(jj, dj);
+            auto* acc = entryAlloca(llvmType(result_elem), "acc");
+            builder_.CreateStore(loadElem(out, result_elem, flatIndex(i, n, j)), acc);
+            forRange(block, [&](Value* dk) {
+              Value* p = builder_.CreateAdd(kk, dk);
+              Value* x = convert(loadElem(a, a_elem, flatIndex(i, k, p)), a_elem, result_elem);
+              Value* y = convert(loadElem(b, b_elem, flatIndex(p, n, j)), b_elem, result_elem);
+              Value* cur = builder_.CreateLoad(llvmType(result_elem), acc);
+              builder_.CreateStore(binaryOp("+", cur, result_elem, binaryOp("*", x, result_elem, y, result_elem), result_elem), acc);
+            });
+            builder_.CreateStore(builder_.CreateLoad(llvmType(result_elem), acc), elemPtr(out, result_elem, flatIndex(i, n, j)));
+          });
+        });
+      }, block);
+    }, block);
+  }, block);
+  return out;
 }
 
 void CodeGenerator::visit(ast::TranslationUnit& n) {
@@ -464,7 +597,7 @@ void CodeGenerator::visit(ast::VarDecl& n) {
     new llvm::GlobalVariable(*module_, type, false, llvm::GlobalValue::ExternalLinkage, init, n.name);
     return;
   }
-  auto* slot = entryAlloca(type, n.name);
+  auto* slot = isTensor(n.type.name) ? tensorAlloc(n.type.name, n.name) : entryAlloca(type, n.name);
   if (!n.init && isTensor(n.type.name)) {  // tensors start zeroed
     builder_.CreateMemSet(slot, builder_.getInt8(0), static_cast<uint64_t>(parseTensor(n.type.name).size()) * 4,
                           llvm::MaybeAlign(4));
@@ -610,6 +743,12 @@ void CodeGenerator::visit(ast::BinaryExpr& n) {
     return;
   }
 
+  if (isTensor(n.expr_type.name)) {
+    if (Value* fused = tryFuse(n)) {
+      value_ = fused;
+      return;
+    }
+  }
   Value* l = eval(*n.lhs);
   Value* r = eval(*n.rhs);
   if (isTensor(lt) || isTensor(rt)) {
@@ -627,8 +766,12 @@ void CodeGenerator::visit(ast::UnaryExpr& n) {
   Value* v = eval(*n.operand);
   const std::string& t = n.operand->expr_type.name;
   if (isTensor(t)) {  // only "-" passes sema
+    if (Value* fused = tryFuse(n)) {
+      value_ = fused;
+      return;
+    }
     const Shape s = parseTensor(t);
-    auto* out = entryAlloca(llvmType(t), "t");
+    auto* out = tensorAlloc(t, "t");
     forRange(s.size(), [&](Value* i) {
       Value* x = loadElem(v, s.elem, i);
       builder_.CreateStore(s.elem == "float" ? builder_.CreateFNeg(x) : builder_.CreateNeg(x), elemPtr(out, s.elem, i));
@@ -652,7 +795,7 @@ void CodeGenerator::visit(ast::CallExpr& n) {
   std::vector<Value*> args;
   Value* result_slot = nullptr;
   if (isTensor(decl->return_type.name)) {
-    result_slot = entryAlloca(llvmType(decl->return_type.name), "ret");
+    result_slot = tensorAlloc(decl->return_type.name, "ret");
     args.push_back(result_slot);
   }
   for (size_t i = 0; i < n.args.size(); ++i) {
@@ -660,7 +803,7 @@ void CodeGenerator::visit(ast::CallExpr& n) {
     const std::string& arg_type = n.args[i]->expr_type.name;
     Value* v = eval(*n.args[i]);
     if (isTensor(param_type)) {  // pass a private copy: tensors have value semantics
-      auto* copy = entryAlloca(llvmType(param_type), "arg");
+      auto* copy = tensorAlloc(param_type, "arg");
       assignTensor(copy, param_type, v, arg_type);
       args.push_back(copy);
     } else {
@@ -689,7 +832,7 @@ void CodeGenerator::visit(ast::VarRef& n) {
 void CodeGenerator::visit(ast::TensorLiteral& n) {
   const std::string& type = n.expr_type.name;
   const Shape s = parseTensor(type);
-  auto* out = entryAlloca(llvmType(type), "lit");
+  auto* out = tensorAlloc(type, "lit");
   long long unit = 1;  // elements contributed by each entry of the literal
   for (size_t d = 1; d < s.dims.size(); ++d) unit *= s.dims[d];
   for (size_t k = 0; k < n.elements.size(); ++k) {

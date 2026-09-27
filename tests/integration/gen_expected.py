@@ -59,6 +59,14 @@ def tensor_loops():
     return "".join(map(fmt, [c, c.sum(), t, t[0][2] + t[1][2]]))
 
 
+def tensor_tiled_matmul():
+    i, j = np.meshgrid(np.arange(64), np.arange(64), indexing="ij")
+    a = ((i * 64 + j) * 0.001 - 2).astype(F)
+    b = ((i - j) * 0.01).astype(F)
+    c = a @ b
+    return "".join(map(fmt, [c.sum(), c[0][0], c[63][63], c[10][20]]))
+
+
 def tensor_mlp():
     x = np.array([[1, -2, 0.5]], F)
     w1 = np.array([[0.5, -1, 0.25, 2], [1, 0.5, -0.5, 0], [-2, 1, 1, 0.5]], F)
@@ -138,9 +146,12 @@ def grad_mlp():
 
 
 EXACT = (tensor_basic, tensor_functions, tensor_loops, tensor_mlp)
+TOLERANT_TIGHT = (tensor_tiled_matmul,)  # float32 accumulation order differs slightly from NumPy's BLAS
 TOLERANT = {tensor_math: "1e-5", grad_scalar: "1e-4", grad_tensor: "2e-3", grad_train: "1e-3", grad_mlp: "2e-3"}
-for fn in EXACT + tuple(TOLERANT):
+for fn in EXACT + TOLERANT_TIGHT + tuple(TOLERANT):
     (out_dir / (fn.__name__ + ".out")).write_text(fn())
+    if fn in TOLERANT_TIGHT:
+        (out_dir / (fn.__name__ + ".tol")).write_text("2e-5\n")
     if fn in TOLERANT:  # relative tolerance for run.sh (float32 compiler vs float64 / NumPy oracle)
         (out_dir / (fn.__name__ + ".tol")).write_text(TOLERANT[fn] + "\n")
     print("wrote", fn.__name__ + ".out")

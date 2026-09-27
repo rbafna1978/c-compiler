@@ -18,6 +18,8 @@ Testing/
 *.dylib
 *.exe
 *.out
+# ...except the integration tests' expected-stdout fixtures, which happen to share the extension.
+!tests/integration/test_programs/*.out
 
 # Generated binaries
 compiler
@@ -26,3 +28,4 @@ unit_tests
 # macOS
 .DS_Store
 graphify-out/
+benchmarks/.bench_tmp/

@@ -29,7 +29,9 @@ constexpr const char* kUsage =
     "  -O              Enable optimizations\n"
     "  --dump-tokens   Print the token stream and stop\n"
     "  --dump-ast      Print the AST and stop\n"
-    "  --dump-grad     Print the AST after autodiff (shows generated __grad_* functions) and stop\n";
+    "  --dump-grad     Print the AST after autodiff (shows generated __grad_* functions) and stop\n"
+    "  --no-fuse       Disable elementwise fusion (one loop per tensor operator, for comparison)\n"
+    "  --no-tile       Disable cache-blocked matmul (always use the naive triple loop)\n";
 
 bool endsWith(const std::string& s, const std::string& suffix) {
   return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
@@ -52,6 +54,7 @@ int run(const std::vector<std::string>& args) {
 int main(int argc, char** argv) {
   std::string input, output;
   bool emit_ir = false, optimize = false, dump_tokens = false, dump_ast = false, dump_grad = false;
+  bool fuse = true, tile = true;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--help") {
@@ -69,6 +72,10 @@ int main(int argc, char** argv) {
       dump_ast = true;
     } else if (arg == "--dump-grad") {
       dump_grad = true;
+    } else if (arg == "--no-fuse") {
+      fuse = false;
+    } else if (arg == "--no-tile") {
+      tile = false;
     } else if (!arg.empty() && arg[0] == '-') {
       std::cerr << "unknown option: " << arg << "\n" << kUsage;
       return 2;
@@ -117,7 +124,7 @@ int main(int argc, char** argv) {
     std::cout << compiler::ast::prettyPrint(*unit);
     return 0;
   }
-  compiler::codegen::CodeGenerator codegen(input);
+  compiler::codegen::CodeGenerator codegen(input, fuse, tile);
   if (!codegen.generate(*unit)) {
     for (const auto& d : codegen.diagnostics()) std::cerr << input << ": error: " << d << "\n";
     return 1;

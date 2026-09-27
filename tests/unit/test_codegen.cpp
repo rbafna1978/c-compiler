@@ -76,3 +76,58 @@ TEST(CodegenTest, LowersTensorsToFlatStorageAndLoops) {
   EXPECT_TRUE(has(ir, "loop.body"));
   EXPECT_TRUE(has(ir, "call i32 (ptr, ...) @printf"));
 }
+
+TEST(CodegenTest, FusesElementwiseChainsIntoOneLoop) {
+  // A basic block LABEL DEFINITION starts a line with no '%' prefix ("loop.body:", "loop.body1:", ...);
+  // a branch to it is written "%loop.body" (with '%'), so this distinguishes definitions from references.
+  auto count = [](const std::string& ir, const std::string& s) {
+    size_t n = 0, pos = 0;
+    while ((pos = ir.find("\n" + s, pos)) != std::string::npos) { ++n; pos += s.size(); }
+    return n;
+  };
+  const std::string src =
+      "int main() { tensor<float, 2, 2> c = [[1, 2], [3, 4]]; tensor<float, 2, 2> d = c * 2 - c / 4 + 1;"
+      " print(sum(d)); return 0; }";
+
+  compiler::parser::Parser parser;
+  auto unit = parser.parse(src, "fuse.c");
+  compiler::sema::SemanticAnalyzer sema;
+  ASSERT_TRUE(sema.analyze(*unit));
+
+  compiler::codegen::CodeGenerator fused("fused", /*fuse=*/true, /*tile=*/true);
+  ASSERT_TRUE(fused.generate(*unit));
+  const std::string fused_ir = fused.ir();
+
+  auto unit2 = parser.parse(src, "fuse.c");
+  compiler::sema::SemanticAnalyzer sema2;
+  ASSERT_TRUE(sema2.analyze(*unit2));
+  compiler::codegen::CodeGenerator unfused("unfused", /*fuse=*/false, /*tile=*/true);
+  ASSERT_TRUE(unfused.generate(*unit2));
+  const std::string unfused_ir = unfused.ir();
+
+  // c*2 - c/4 + 1 is 3 binary ops: unfused makes 3 loops (+3 heap/stack temporaries), fused makes 1.
+  // c*2 - c/4 + 1 has 4 binary ops (*, /, -, +). Both IRs also contain the literal's int->float
+  // conversion loop and sum's reduction loop, so unfused makes 4+2=6 loops; fused collapses the
+  // 4 arithmetic ops into 1, making 1+2=3 -- exactly 3 fewer loops (and 3 fewer temporaries).
+  EXPECT_EQ(count(fused_ir, "loop.body"), 3U);
+  EXPECT_EQ(count(unfused_ir, "loop.body"), 6U);
+}
+
+TEST(CodegenTest, TilesLargeMatmulButNotSmall) {
+  auto compile_matmul = [](long long n, bool tile) {
+    const std::string src = "tensor<float, " + std::to_string(n) + ", " + std::to_string(n) +
+                            "> f(tensor<float, " + std::to_string(n) + ", " + std::to_string(n) +
+                            "> a, tensor<float, " + std::to_string(n) + ", " + std::to_string(n) +
+                            "> b) { return matmul(a, b); }";
+    compiler::parser::Parser parser;
+    auto unit = parser.parse(src, "mm.c");
+    compiler::sema::SemanticAnalyzer sema;
+    EXPECT_TRUE(sema.analyze(*unit));
+    compiler::codegen::CodeGenerator cg("mm", /*fuse=*/true, tile);
+    EXPECT_TRUE(cg.generate(*unit));
+    return cg.ir();
+  };
+  EXPECT_TRUE(compile_matmul(64, true).find("memset") != std::string::npos);   // tiled: zeroes `out` up front
+  EXPECT_TRUE(compile_matmul(64, false).find("memset") == std::string::npos);  // naive: no upfront zeroing
+  EXPECT_TRUE(compile_matmul(10, true).find("memset") == std::string::npos);   // 10 isn't a multiple of 32: falls back
+}
