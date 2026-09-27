@@ -9,15 +9,17 @@ namespace compiler::ast {
 
 struct ASTVisitor;
 
+struct TypeInfo {
+  std::string name;
+};
+
 /** Base AST node. */
 struct ASTNode {
   virtual ~ASTNode() = default;
   virtual void accept(ASTVisitor& visitor) = 0;
   int line = 1;
-};
-
-struct TypeInfo {
-  std::string name;
+  /** Expression type, filled in by semantic analysis ("<error>" if ill-typed). */
+  TypeInfo expr_type;
 };
 
 struct ParamDecl {

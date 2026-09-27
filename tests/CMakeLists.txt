@@ -2,6 +2,8 @@ add_executable(unit_tests
   ${CMAKE_SOURCE_DIR}/src/lexer/lexer.cpp
   ${CMAKE_SOURCE_DIR}/src/parser/parser.cpp
   ${CMAKE_SOURCE_DIR}/src/ast/ast.cpp
+  ${CMAKE_SOURCE_DIR}/src/sema/sema.cpp
+  ${CMAKE_SOURCE_DIR}/src/sema/symbol_table.cpp
   ${CMAKE_BINARY_DIR}/generated/parser.cpp
   ${CMAKE_BINARY_DIR}/generated/lexer.cpp
   unit/test_lexer.cpp

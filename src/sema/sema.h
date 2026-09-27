@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "ast/ast.h"
@@ -8,7 +9,7 @@
 
 namespace compiler::sema {
 
-/** Semantic analyzer stub. */
+/** Resolves names and checks types; stores expression types in ASTNode::expr_type. */
 class SemanticAnalyzer : public ast::ASTVisitor {
  public:
   /** Analyzes the translation unit and collects diagnostics. */
@@ -39,7 +40,15 @@ class SemanticAnalyzer : public ast::ASTVisitor {
   void visit(ast::VarRef&) override;
 
  private:
+  void error(int line, const std::string& message);
+  std::string typeOf(ast::ASTNode& node);
+  void checkType(const ast::TypeInfo& type, int line);
+  void checkCondition(ast::ASTNode& expr, int line);
+
   SymbolTable symbols_;
+  std::unordered_map<std::string, const ast::FunctionDecl*> funcs_;
+  std::unordered_map<std::string, std::vector<ast::FieldDecl>> structs_;  // key: "struct X"
+  std::string current_return_;
   std::vector<std::string> diagnostics_;
 };
 
