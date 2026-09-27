@@ -1,8 +1,15 @@
 #include "sema/sema.h"
 
-#include <sstream>
+#include "ast/tensor_type.h"
+
 
 namespace compiler::sema {
+
+using ast::isTensor;
+using ast::parseTensor;
+using ast::promote;
+using ast::Shape;
+using ast::tensorName;
 
 namespace {
 
@@ -14,33 +21,6 @@ bool isPtr(const std::string& t) { return !t.empty() && t.back() == '*'; }
 bool isScalar(const std::string& t) { return isNumeric(t) || isPtr(t); }
 bool isStructName(const std::string& t) { return t.rfind("struct ", 0) == 0 && !isPtr(t); }
 
-// Tensor types are canonical strings: "tensor<float,2,3>" (element type, then dimensions).
-bool isTensor(const std::string& t) { return t.rfind("tensor<", 0) == 0 && t.back() == '>'; }
-
-struct Shape {
-  std::string elem;
-  std::vector<long long> dims;
-};
-
-Shape parseTensor(const std::string& t) {
-  Shape s;
-  std::stringstream in(t.substr(7, t.size() - 8));
-  std::string part;
-  std::getline(in, s.elem, ',');
-  while (std::getline(in, part, ',')) s.dims.push_back(std::stoll(part));
-  return s;
-}
-
-std::string tensorName(const std::string& elem, const std::vector<long long>& dims) {
-  std::string name = "tensor<" + elem;
-  for (long long d : dims) name += "," + std::to_string(d);
-  return name + ">";
-}
-
-std::string promote(const std::string& a, const std::string& b) {
-  return (a == "float" || b == "float") ? "float" : "int";
-}
-
 // Same shape required; an int tensor converts implicitly to a float tensor.
 bool compatible(const std::string& to, const std::string& from) {
   if (isTensor(to) && isTensor(from)) {
@@ -50,7 +30,9 @@ bool compatible(const std::string& to, const std::string& from) {
   return to == from || (isNumeric(to) && isNumeric(from));
 }
 
-bool isBuiltin(const std::string& name) { return name == "matmul" || name == "transpose" || name == "sum"; }
+bool isBuiltin(const std::string& name) {
+  return name == "matmul" || name == "transpose" || name == "sum" || name == "print";
+}
 
 bool isLvalue(const ast::ASTNode& n) {
   if (dynamic_cast<const ast::VarRef*>(&n) || dynamic_cast<const ast::MemberExpr*>(&n) ||
@@ -397,6 +379,17 @@ std::string SemanticAnalyzer::tensorArith(int line, const std::string& op, const
 
 std::string SemanticAnalyzer::builtinType(ast::CallExpr& n, const std::vector<std::string>& arg_types) {
   const std::string& name = n.callee;
+  if (name == "print") {  // print(x): numbers, tensors and string literals
+    for (const auto& t : arg_types) {
+      if (t == kErr) return kErr;
+    }
+    if (arg_types.size() != 1) {
+      error(n.line, "'print' expects 1 argument(s), got " + std::to_string(arg_types.size()));
+    } else if (!isNumeric(arg_types[0]) && !isTensor(arg_types[0]) && arg_types[0] != "char*") {
+      error(n.line, "cannot print value of type '" + arg_types[0] + "'");
+    }
+    return "void";
+  }
   const size_t want = name == "matmul" ? 2 : 1;
   for (const auto& t : arg_types) {
     if (t == kErr) return kErr;

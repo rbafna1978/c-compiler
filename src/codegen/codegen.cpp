@@ -5,11 +5,18 @@
 
 #include <stdexcept>
 
+#include "ast/tensor_type.h"
+
 namespace compiler::codegen {
 
 using llvm::BasicBlock;
 using llvm::CmpInst;
 using llvm::Value;
+using ast::isTensor;
+using ast::parseTensor;
+using ast::promote;
+using ast::Shape;
+using ast::tensorName;
 
 namespace {
 
@@ -97,7 +104,10 @@ llvm::Type* CodeGenerator::llvmType(const std::string& t) {
   if (t == "float") return builder_.getFloatTy();
   if (t == "void") return builder_.getVoidTy();
   if (isPtr(t)) return builder_.getPtrTy();
-  if (t.rfind("tensor<", 0) == 0) throw std::runtime_error("tensor codegen is not implemented yet");
+  if (isTensor(t)) {
+    const Shape s = parseTensor(t);
+    return llvm::ArrayType::get(llvmType(s.elem), s.size());
+  }
   return structs_.at(t).type;
 }
 
@@ -146,6 +156,14 @@ Value* CodeGenerator::lvalue(ast::ASTNode& n) {
   if (auto* s = dynamic_cast<ast::ArraySubscript*>(&n)) {
     Value* base = eval(*s->array);
     Value* idx = convert(eval(*s->index), s->index->expr_type.name, "int");
+    const std::string& array_type = s->array->expr_type.name;
+    if (isTensor(array_type)) {  // A[i]: skip i rows of the remaining dimensions
+      const Shape a = parseTensor(array_type);
+      long long stride = 1;
+      for (size_t d = 1; d < a.dims.size(); ++d) stride *= a.dims[d];
+      idx = builder_.CreateMul(idx, builder_.getInt32(static_cast<uint32_t>(stride)));
+      return builder_.CreateGEP(llvmType(a.elem), base, idx);
+    }
     return builder_.CreateGEP(llvmType(s->expr_type.name), base, idx);
   }
   if (auto* u = dynamic_cast<ast::UnaryExpr*>(&n); u && u->op == "*") {
@@ -194,6 +212,166 @@ Value* CodeGenerator::binaryOp(const std::string& op, Value* l, const std::strin
   return builder_.CreateSRem(l, r);  // "%": sema guarantees integer operands
 }
 
+Value* CodeGenerator::elemPtr(Value* base, const std::string& elem, Value* index) {
+  return builder_.CreateGEP(llvmType(elem), base, index);
+}
+
+Value* CodeGenerator::loadElem(Value* base, const std::string& elem, Value* index) {
+  return builder_.CreateLoad(llvmType(elem), elemPtr(base, elem, index));
+}
+
+// Loads element `index` of tensor `v`, or passes a scalar through, converted to `to_elem`.
+Value* CodeGenerator::tensorOperand(Value* v, const std::string& type, Value* index,
+                                    const std::string& to_elem) {
+  if (isTensor(type)) {
+    const std::string elem = parseTensor(type).elem;
+    return convert(loadElem(v, elem, index), elem, to_elem);
+  }
+  return convert(v, type, to_elem);
+}
+
+// Emits `for (i = 0; i < n; ++i) body(i)`. The counter lives in the entry block (mem2reg cleans it up).
+void CodeGenerator::forRange(long long n, const std::function<void(Value*)>& body) {
+  auto* counter = entryAlloca(builder_.getInt32Ty(), "i");
+  builder_.CreateStore(builder_.getInt32(0), counter);
+  auto* cond_bb = BasicBlock::Create(ctx_, "loop.cond", fn_);
+  auto* body_bb = BasicBlock::Create(ctx_, "loop.body", fn_);
+  auto* end_bb = BasicBlock::Create(ctx_, "loop.end", fn_);
+  builder_.CreateBr(cond_bb);
+  builder_.SetInsertPoint(cond_bb);
+  Value* i = builder_.CreateLoad(builder_.getInt32Ty(), counter);
+  builder_.CreateCondBr(builder_.CreateICmpSLT(i, builder_.getInt32(static_cast<uint32_t>(n))), body_bb, end_bb);
+  builder_.SetInsertPoint(body_bb);
+  body(i);
+  builder_.CreateStore(builder_.CreateAdd(i, builder_.getInt32(1)), counter);
+  builder_.CreateBr(cond_bb);
+  builder_.SetInsertPoint(end_bb);
+}
+
+void CodeGenerator::assignTensor(Value* dst, const std::string& dst_type, Value* src,
+                                 const std::string& src_type) {
+  const Shape d = parseTensor(dst_type), s = parseTensor(src_type);
+  if (d.elem == s.elem) {  // int and float are both 4 bytes
+    builder_.CreateMemMove(dst, llvm::MaybeAlign(4), src, llvm::MaybeAlign(4),
+                           builder_.getInt64(static_cast<uint64_t>(d.size()) * 4));
+    return;
+  }
+  forRange(d.size(), [&](Value* i) {
+    builder_.CreateStore(convert(loadElem(src, s.elem, i), s.elem, d.elem), elemPtr(dst, d.elem, i));
+  });
+}
+
+void CodeGenerator::store(Value* dst, const std::string& dst_type, Value* src, const std::string& src_type) {
+  if (isTensor(dst_type)) {
+    assignTensor(dst, dst_type, src, src_type);
+  } else {
+    builder_.CreateStore(convert(src, src_type, dst_type), dst);
+  }
+}
+
+// Elementwise op over same-shape tensors; a scalar operand broadcasts.
+Value* CodeGenerator::tensorBinary(const std::string& op, Value* l, const std::string& lt, Value* r,
+                                   const std::string& rt, const std::string& result) {
+  const Shape rs = parseTensor(result);
+  auto* out = entryAlloca(llvmType(result), "t");
+  forRange(rs.size(), [&](Value* i) {
+    Value* v = binaryOp(op, tensorOperand(l, lt, i, rs.elem), rs.elem, tensorOperand(r, rt, i, rs.elem), rs.elem);
+    builder_.CreateStore(v, elemPtr(out, rs.elem, i));
+  });
+  return out;
+}
+
+Value* CodeGenerator::emitBuiltin(ast::CallExpr& n) {
+  const std::string& name = n.callee;
+  if (name == "print") {
+    emitPrint(n);
+    return nullptr;
+  }
+  Value* a = eval(*n.args[0]);
+  const std::string& at = n.args[0]->expr_type.name;
+  const Shape as = parseTensor(at);
+
+  if (name == "sum") {
+    auto* acc = entryAlloca(llvmType(as.elem), "acc");
+    builder_.CreateStore(llvm::Constant::getNullValue(llvmType(as.elem)), acc);
+    forRange(as.size(), [&](Value* i) {
+      Value* cur = builder_.CreateLoad(llvmType(as.elem), acc);
+      builder_.CreateStore(binaryOp("+", cur, as.elem, loadElem(a, as.elem, i), as.elem), acc);
+    });
+    return builder_.CreateLoad(llvmType(as.elem), acc);
+  }
+
+  auto at2 = [&](Value* i, long long stride, Value* j) {  // flat index i*stride + j
+    return builder_.CreateAdd(builder_.CreateMul(i, builder_.getInt32(static_cast<uint32_t>(stride))), j);
+  };
+  const std::string& rt = n.expr_type.name;
+  const Shape rs = parseTensor(rt);
+  auto* out = entryAlloca(llvmType(rt), "t");
+
+  if (name == "transpose") {
+    forRange(as.dims[0], [&](Value* i) {
+      forRange(as.dims[1], [&](Value* j) {
+        builder_.CreateStore(loadElem(a, as.elem, at2(i, as.dims[1], j)), elemPtr(out, as.elem, at2(j, as.dims[0], i)));
+      });
+    });
+    return out;
+  }
+
+  if (name == "matmul") {
+    Value* b = eval(*n.args[1]);
+    const Shape bs = parseTensor(n.args[1]->expr_type.name);
+    const long long m = as.dims[0], k = as.dims[1], nn = bs.dims[1];
+    auto* acc = entryAlloca(llvmType(rs.elem), "acc");
+    forRange(m, [&](Value* i) {
+      forRange(nn, [&](Value* j) {
+        builder_.CreateStore(llvm::Constant::getNullValue(llvmType(rs.elem)), acc);
+        forRange(k, [&](Value* p) {
+          Value* x = convert(loadElem(a, as.elem, at2(i, k, p)), as.elem, rs.elem);
+          Value* y = convert(loadElem(b, bs.elem, at2(p, nn, j)), bs.elem, rs.elem);
+          Value* cur = builder_.CreateLoad(llvmType(rs.elem), acc);
+          builder_.CreateStore(binaryOp("+", cur, rs.elem, binaryOp("*", x, rs.elem, y, rs.elem), rs.elem), acc);
+        });
+        builder_.CreateStore(builder_.CreateLoad(llvmType(rs.elem), acc), elemPtr(out, rs.elem, at2(i, nn, j)));
+      });
+    });
+    return out;
+  }
+  throw std::runtime_error("builtin '" + name + "' is not implemented yet");
+}
+
+// print(x): ints as %d, floats as %g, strings as %s; tensors one innermost row per line.
+void CodeGenerator::emitPrint(ast::CallExpr& n) {
+  auto printf_fn = module_->getOrInsertFunction(
+      "printf", llvm::FunctionType::get(builder_.getInt32Ty(), {builder_.getPtrTy()}, /*isVarArg=*/true));
+  auto cstr = [&](const char* text) { return builder_.CreateGlobalStringPtr(text, "fmt", 0, module_.get()); };
+  const std::string& t = n.args[0]->expr_type.name;
+  Value* v = eval(*n.args[0]);
+
+  if (t == "char*") {
+    builder_.CreateCall(printf_fn, {cstr("%s\n"), v});
+  } else if (t == "float") {
+    builder_.CreateCall(printf_fn, {cstr("%g\n"), builder_.CreateFPExt(v, builder_.getDoubleTy())});
+  } else if (!isTensor(t)) {
+    builder_.CreateCall(printf_fn, {cstr("%d\n"), convert(v, t, "int")});
+  } else {
+    const Shape s = parseTensor(t);
+    const bool is_float = s.elem == "float";
+    Value* fmt = cstr(is_float ? "%s%g%s" : "%s%d%s");
+    Value* space = cstr(" ");
+    Value* empty = cstr("");
+    Value* newline = cstr("\n");
+    const auto row = builder_.getInt32(static_cast<uint32_t>(s.dims.back()));
+    forRange(s.size(), [&](Value* i) {
+      Value* x = loadElem(v, s.elem, i);
+      if (is_float) x = builder_.CreateFPExt(x, builder_.getDoubleTy());
+      Value* sep = builder_.CreateSelect(builder_.CreateICmpNE(builder_.CreateSRem(i, row), builder_.getInt32(0)), space, empty);
+      Value* next = builder_.CreateAdd(i, builder_.getInt32(1));
+      Value* tail = builder_.CreateSelect(builder_.CreateICmpEQ(builder_.CreateSRem(next, row), builder_.getInt32(0)), newline, empty);
+      builder_.CreateCall(printf_fn, {fmt, sep, x, tail});
+    });
+  }
+}
+
 void CodeGenerator::visit(ast::TranslationUnit& n) {
   for (auto& d : n.decls) {
     d->accept(*this);
@@ -211,23 +389,37 @@ void CodeGenerator::visit(ast::StructDecl& n) {
 }
 
 void CodeGenerator::visit(ast::FunctionDecl& n) {
+  // Tensors cross calls by pointer: params point at a caller-made copy, and a tensor result is
+  // written through a hidden leading out-pointer.
+  const bool returns_tensor = isTensor(n.return_type.name);
   std::vector<llvm::Type*> params;
+  if (returns_tensor) params.push_back(builder_.getPtrTy());
   for (const auto& p : n.params) {
-    params.push_back(llvmType(p.type.name));
+    params.push_back(isTensor(p.type.name) ? builder_.getPtrTy() : llvmType(p.type.name));
   }
-  auto* fty = llvm::FunctionType::get(llvmType(n.return_type.name), params, false);
+  auto* fty = llvm::FunctionType::get(returns_tensor ? builder_.getVoidTy() : llvmType(n.return_type.name),
+                                      params, false);
   fn_ = llvm::Function::Create(fty, llvm::Function::ExternalLinkage, n.name, *module_);
   funcs_[n.name] = &n;
   current_return_ = n.return_type.name;
 
   builder_.SetInsertPoint(BasicBlock::Create(ctx_, "entry", fn_));
   scopes_.emplace_back();
-  size_t i = 0;
-  for (auto& arg : fn_->args()) {
-    const auto& p = n.params[i++];
-    arg.setName(p.name);
-    auto* slot = entryAlloca(arg.getType(), p.name);
-    builder_.CreateStore(&arg, slot);
+  auto arg = fn_->arg_begin();
+  sret_ = nullptr;
+  if (returns_tensor) {
+    sret_ = &*arg++;
+    sret_->setName("retval");
+  }
+  for (size_t i = 0; arg != fn_->arg_end(); ++arg, ++i) {
+    const auto& p = n.params[i];
+    arg->setName(p.name);
+    if (isTensor(p.type.name)) {
+      scopes_.back()[p.name] = &*arg;
+      continue;
+    }
+    auto* slot = entryAlloca(arg->getType(), p.name);
+    builder_.CreateStore(&*arg, slot);
     scopes_.back()[p.name] = slot;
   }
   n.body->accept(*this);
@@ -241,6 +433,7 @@ void CodeGenerator::visit(ast::FunctionDecl& n) {
   scopes_.pop_back();
   builder_.ClearInsertionPoint();
   fn_ = nullptr;
+  sret_ = nullptr;
 }
 
 void CodeGenerator::visit(ast::VarDecl& n) {
@@ -259,7 +452,7 @@ void CodeGenerator::visit(ast::VarDecl& n) {
   }
   auto* slot = entryAlloca(type, n.name);
   if (n.init) {
-    builder_.CreateStore(convert(eval(*n.init), n.init->expr_type.name, n.type.name), slot);
+    store(slot, n.type.name, eval(*n.init), n.init->expr_type.name);
   }
   scopes_.back()[n.name] = slot;
 }
@@ -333,6 +526,11 @@ void CodeGenerator::visit(ast::ReturnStmt& n) {
     builder_.CreateRetVoid();
     return;
   }
+  if (sret_ != nullptr) {
+    assignTensor(sret_, current_return_, eval(*n.value), n.value->expr_type.name);
+    builder_.CreateRetVoid();
+    return;
+  }
   builder_.CreateRet(convert(eval(*n.value), n.value->expr_type.name, current_return_));
 }
 
@@ -367,6 +565,20 @@ void CodeGenerator::visit(ast::BinaryExpr& n) {
   if (op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=") {
     Value* addr = lvalue(*n.lhs);
     Value* r = eval(*n.rhs);
+    if (isTensor(lt)) {
+      if (op == "=") {
+        store(addr, lt, r, rt);
+      } else {  // A += B, A -= 1, ... in place
+        const Shape ls = parseTensor(lt);
+        forRange(ls.size(), [&](Value* i) {
+          Value* cur = loadElem(addr, ls.elem, i);
+          builder_.CreateStore(binaryOp(op.substr(0, 1), cur, ls.elem, tensorOperand(r, rt, i, ls.elem), ls.elem),
+                               elemPtr(addr, ls.elem, i));
+        });
+      }
+      value_ = addr;
+      return;
+    }
     Value* v = r;
     if (op == "=") {
       v = convert(r, rt, lt);
@@ -382,6 +594,10 @@ void CodeGenerator::visit(ast::BinaryExpr& n) {
 
   Value* l = eval(*n.lhs);
   Value* r = eval(*n.rhs);
+  if (isTensor(lt) || isTensor(rt)) {
+    value_ = tensorBinary(op, l, lt, r, rt, n.expr_type.name);
+    return;
+  }
   value_ = binaryOp(op, l, lt, r, rt);
 }
 
@@ -392,7 +608,15 @@ void CodeGenerator::visit(ast::UnaryExpr& n) {
   }
   Value* v = eval(*n.operand);
   const std::string& t = n.operand->expr_type.name;
-  if (n.op == "*") {
+  if (isTensor(t)) {  // only "-" passes sema
+    const Shape s = parseTensor(t);
+    auto* out = entryAlloca(llvmType(t), "t");
+    forRange(s.size(), [&](Value* i) {
+      Value* x = loadElem(v, s.elem, i);
+      builder_.CreateStore(s.elem == "float" ? builder_.CreateFNeg(x) : builder_.CreateNeg(x), elemPtr(out, s.elem, i));
+    });
+    value_ = out;
+  } else if (n.op == "*") {
     value_ = builder_.CreateLoad(llvmType(n.expr_type.name), v);
   } else if (n.op == "!") {
     value_ = builder_.CreateZExt(builder_.CreateNot(toBool(v, t)), builder_.getInt32Ty());
@@ -402,32 +626,65 @@ void CodeGenerator::visit(ast::UnaryExpr& n) {
 }
 
 void CodeGenerator::visit(ast::CallExpr& n) {
-  if (!funcs_.count(n.callee)) throw std::runtime_error("builtin '" + n.callee + "' is not implemented yet");
+  if (!funcs_.count(n.callee)) {  // user functions shadow builtins
+    value_ = emitBuiltin(n);
+    return;
+  }
   const auto* decl = funcs_.at(n.callee);
   std::vector<Value*> args;
-  for (size_t i = 0; i < n.args.size(); ++i) {
-    args.push_back(convert(eval(*n.args[i]), n.args[i]->expr_type.name, decl->params[i].type.name));
+  Value* result_slot = nullptr;
+  if (isTensor(decl->return_type.name)) {
+    result_slot = entryAlloca(llvmType(decl->return_type.name), "ret");
+    args.push_back(result_slot);
   }
-  value_ = builder_.CreateCall(module_->getFunction(n.callee), args);
+  for (size_t i = 0; i < n.args.size(); ++i) {
+    const std::string& param_type = decl->params[i].type.name;
+    const std::string& arg_type = n.args[i]->expr_type.name;
+    Value* v = eval(*n.args[i]);
+    if (isTensor(param_type)) {  // pass a private copy: tensors have value semantics
+      auto* copy = entryAlloca(llvmType(param_type), "arg");
+      assignTensor(copy, param_type, v, arg_type);
+      args.push_back(copy);
+    } else {
+      args.push_back(convert(v, arg_type, param_type));
+    }
+  }
+  Value* call = builder_.CreateCall(module_->getFunction(n.callee), args);
+  value_ = result_slot != nullptr ? result_slot : call;
 }
 
 void CodeGenerator::visit(ast::MemberExpr& n) {
   Value* addr = lvalue(n);
-  value_ = builder_.CreateLoad(llvmType(n.expr_type.name), addr);
+  value_ = isTensor(n.expr_type.name) ? addr : builder_.CreateLoad(llvmType(n.expr_type.name), addr);
 }
 
 void CodeGenerator::visit(ast::ArraySubscript& n) {
   Value* addr = lvalue(n);
-  value_ = builder_.CreateLoad(llvmType(n.expr_type.name), addr);
+  value_ = isTensor(n.expr_type.name) ? addr : builder_.CreateLoad(llvmType(n.expr_type.name), addr);
 }
 
 void CodeGenerator::visit(ast::VarRef& n) {
   Value* addr = lvalue(n);
-  value_ = builder_.CreateLoad(llvmType(n.expr_type.name), addr);
+  value_ = isTensor(n.expr_type.name) ? addr : builder_.CreateLoad(llvmType(n.expr_type.name), addr);
 }
 
-void CodeGenerator::visit(ast::TensorLiteral&) {
-  throw std::runtime_error("tensor codegen is not implemented yet");
+void CodeGenerator::visit(ast::TensorLiteral& n) {
+  const std::string& type = n.expr_type.name;
+  const Shape s = parseTensor(type);
+  auto* out = entryAlloca(llvmType(type), "lit");
+  long long unit = 1;  // elements contributed by each entry of the literal
+  for (size_t d = 1; d < s.dims.size(); ++d) unit *= s.dims[d];
+  for (size_t k = 0; k < n.elements.size(); ++k) {
+    Value* v = eval(*n.elements[k]);
+    const std::string& et = n.elements[k]->expr_type.name;
+    Value* pos = builder_.getInt32(static_cast<uint32_t>(k * unit));
+    if (isTensor(et)) {
+      store(elemPtr(out, s.elem, pos), tensorName(s.elem, parseTensor(et).dims), v, et);
+    } else {
+      builder_.CreateStore(convert(v, et, s.elem), elemPtr(out, s.elem, pos));
+    }
+  }
+  value_ = out;
 }
 void CodeGenerator::visit(ast::IntLiteral& n) { value_ = builder_.getInt32(static_cast<uint32_t>(n.value)); }
 void CodeGenerator::visit(ast::FloatLiteral& n) {

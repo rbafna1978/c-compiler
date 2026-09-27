@@ -66,3 +66,13 @@ TEST(CodegenTest, RejectsNonConstantGlobalInit) {
   compiler::codegen::CodeGenerator cg;
   EXPECT_FALSE(cg.generate(*unit));
 }
+
+TEST(CodegenTest, LowersTensorsToFlatStorageAndLoops) {
+  const auto ir = compile(
+      "tensor<float, 2, 2> f(tensor<float, 2, 2> a) { return matmul(a, a) + a; }\n"
+      "int main() { tensor<float, 2, 2> m = [[1, 2], [3, 4]]; print(sum(f(m))); return 0; }");
+  EXPECT_TRUE(has(ir, "define void @f(ptr %retval, ptr %a)"));  // tensor result via out-pointer
+  EXPECT_TRUE(has(ir, "[4 x float]"));                          // 2x2 stored flat, row-major
+  EXPECT_TRUE(has(ir, "loop.body"));
+  EXPECT_TRUE(has(ir, "call i32 (ptr, ...) @printf"));
+}

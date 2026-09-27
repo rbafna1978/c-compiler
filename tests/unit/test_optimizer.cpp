@@ -43,3 +43,9 @@ TEST(OptimizerTest, FoldsConstantsThroughCallsAndLoops) {
       true);
   EXPECT_TRUE(has(ir, "ret i32 14"));  // 0 + 1 + 4 + 9
 }
+
+TEST(OptimizerTest, FoldsTensorProgramsToConstants) {
+  const auto ir = compile(
+      "int main() { tensor<int, 2, 2> a = [[1, 2], [3, 4]]; tensor<int, 2, 2> b = a + a; return sum(b); }", true);
+  EXPECT_TRUE(has(ir, "ret i32 20"));
+}

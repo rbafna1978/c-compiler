@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -63,6 +64,19 @@ class CodeGenerator : public ast::ASTVisitor {
   llvm::Value* binaryOp(const std::string& op, llvm::Value* l, const std::string& lt,
                         llvm::Value* r, const std::string& rt);
   llvm::AllocaInst* entryAlloca(llvm::Type* type, const std::string& name);
+  // Tensors live in flat row-major storage; a tensor-typed expression evaluates to its address.
+  void store(llvm::Value* dst, const std::string& dst_type, llvm::Value* src, const std::string& src_type);
+  void assignTensor(llvm::Value* dst, const std::string& dst_type, llvm::Value* src,
+                    const std::string& src_type);
+  void forRange(long long n, const std::function<void(llvm::Value*)>& body);
+  llvm::Value* elemPtr(llvm::Value* base, const std::string& elem, llvm::Value* index);
+  llvm::Value* loadElem(llvm::Value* base, const std::string& elem, llvm::Value* index);
+  llvm::Value* tensorOperand(llvm::Value* v, const std::string& type, llvm::Value* index,
+                             const std::string& to_elem);
+  llvm::Value* tensorBinary(const std::string& op, llvm::Value* l, const std::string& lt, llvm::Value* r,
+                            const std::string& rt, const std::string& result);
+  llvm::Value* emitBuiltin(ast::CallExpr& call);
+  void emitPrint(ast::CallExpr& call);
   bool terminated() const;
   void error(int line, const std::string& message);
 
@@ -71,6 +85,7 @@ class CodeGenerator : public ast::ASTVisitor {
   llvm::IRBuilder<> builder_;
   llvm::Function* fn_ = nullptr;
   llvm::Value* value_ = nullptr;
+  llvm::Value* sret_ = nullptr;  // out-pointer of the current function if it returns a tensor
   std::string current_return_;
   std::vector<std::unordered_map<std::string, llvm::Value*>> scopes_;
   std::unordered_map<std::string, StructInfo> structs_;  // key: "struct X"
