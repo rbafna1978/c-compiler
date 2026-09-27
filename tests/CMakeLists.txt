@@ -34,3 +34,9 @@ target_include_directories(unit_tests PRIVATE
 
 include(GoogleTest)
 gtest_discover_tests(unit_tests)
+
+add_test(
+  NAME integration
+  COMMAND ${CMAKE_SOURCE_DIR}/tests/integration/run.sh $<TARGET_FILE:compiler>
+          ${CMAKE_SOURCE_DIR}/tests/integration/test_programs
+)
