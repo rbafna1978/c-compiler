@@ -11,6 +11,7 @@
 
 #include "codegen/codegen.h"
 #include "lexer/lexer.h"
+#include "optimizer/optimizer.h"
 #include "parser/parser.h"
 #include "sema/sema.h"
 
@@ -114,6 +115,8 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  if (optimize) compiler::optimizer::optimize(codegen.module());
+
   if (emit_ir || endsWith(output, ".ll")) {
     if (output.empty()) {
       std::cout << codegen.ir();
@@ -131,9 +134,7 @@ int main(int argc, char** argv) {
     std::cerr << "cannot write " << tmp << "\n";
     return 2;
   }
-  // ponytail: -O is forwarded to clang; replaced by our own PassBuilder pipeline in Phase 6.
-  std::vector<std::string> cmd = {"clang", "-Wno-override-module", "-x", "ir", tmp, "-o", output};
-  if (optimize) cmd.push_back("-O2");
+  const std::vector<std::string> cmd = {"clang", "-Wno-override-module", "-x", "ir", tmp, "-o", output};
   const int rc = run(cmd);
   std::remove(tmp.c_str());
   if (rc != 0) {

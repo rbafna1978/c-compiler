@@ -5,6 +5,7 @@ add_executable(unit_tests
   ${CMAKE_SOURCE_DIR}/src/sema/sema.cpp
   ${CMAKE_SOURCE_DIR}/src/sema/symbol_table.cpp
   ${CMAKE_SOURCE_DIR}/src/codegen/codegen.cpp
+  ${CMAKE_SOURCE_DIR}/src/optimizer/optimizer.cpp
   ${CMAKE_BINARY_DIR}/generated/parser.cpp
   ${CMAKE_BINARY_DIR}/generated/lexer.cpp
   unit/test_lexer.cpp
@@ -39,4 +40,10 @@ add_test(
   NAME integration
   COMMAND ${CMAKE_SOURCE_DIR}/tests/integration/run.sh $<TARGET_FILE:compiler>
           ${CMAKE_SOURCE_DIR}/tests/integration/test_programs
+)
+
+add_test(
+  NAME integration_optimized
+  COMMAND ${CMAKE_SOURCE_DIR}/tests/integration/run.sh $<TARGET_FILE:compiler>
+          ${CMAKE_SOURCE_DIR}/tests/integration/test_programs -O
 )
