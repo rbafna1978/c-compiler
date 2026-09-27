@@ -25,3 +25,4 @@ unit_tests
 
 # macOS
 .DS_Store
+graphify-out/

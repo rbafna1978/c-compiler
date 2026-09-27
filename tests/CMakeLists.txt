@@ -4,6 +4,7 @@ add_executable(unit_tests
   ${CMAKE_SOURCE_DIR}/src/ast/ast.cpp
   ${CMAKE_SOURCE_DIR}/src/sema/sema.cpp
   ${CMAKE_SOURCE_DIR}/src/sema/symbol_table.cpp
+  ${CMAKE_SOURCE_DIR}/src/codegen/codegen.cpp
   ${CMAKE_BINARY_DIR}/generated/parser.cpp
   ${CMAKE_BINARY_DIR}/generated/lexer.cpp
   unit/test_lexer.cpp
@@ -24,7 +25,7 @@ set_source_files_properties(
   PROPERTIES COMPILE_OPTIONS "-Wno-error"
 )
 
-target_link_libraries(unit_tests PRIVATE GTest::gtest_main)
+target_link_libraries(unit_tests PRIVATE GTest::gtest_main ${LLVM_LIBS})
 
 target_include_directories(unit_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/src
