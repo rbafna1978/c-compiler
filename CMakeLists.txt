@@ -104,6 +104,14 @@ add_executable(compiler
 
 add_dependencies(compiler generate_frontend)
 
+# The driver shells out to clang to assemble/link the IR it emits. That clang's IR parser must be
+# from the SAME LLVM version as the one that generated the IR (newer LLVM IR syntax, e.g. grouped
+# `memory(...)` function attributes, isn't understood by an older clang and fails with a confusing
+# "unterminated attribute group" instead of a version-mismatch error). The system `clang` on PATH is
+# whatever happens to be installed -- not necessarily this LLVM's -- so bake in the exact clang that
+# ships alongside the LLVM_DIR found above; main.cpp falls back to PATH only if this one is missing.
+target_compile_definitions(compiler PRIVATE COMPILER_LLVM_CLANG_PATH="${LLVM_TOOLS_BINARY_DIR}/clang")
+
 target_include_directories(compiler PRIVATE
   ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/src/lexer

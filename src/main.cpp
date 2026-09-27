@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -149,7 +150,16 @@ int main(int argc, char** argv) {
     std::cerr << "cannot write " << tmp << "\n";
     return 2;
   }
-  const std::vector<std::string> cmd = {"clang", "-Wno-override-module", "-x", "ir", tmp, "-o", output};
+  // Prefer the clang that shipped with the LLVM this compiler was built against (baked in by
+  // CMakeLists.txt) so the version that parses this IR always matches the version that emitted
+  // it; fall back to PATH's clang if that one isn't present (e.g. a relocated/packaged binary).
+#ifdef COMPILER_LLVM_CLANG_PATH
+  const std::string clang_path =
+      std::filesystem::exists(COMPILER_LLVM_CLANG_PATH) ? COMPILER_LLVM_CLANG_PATH : "clang";
+#else
+  const std::string clang_path = "clang";
+#endif
+  const std::vector<std::string> cmd = {clang_path, "-Wno-override-module", "-x", "ir", tmp, "-o", output};
   const int rc = run(cmd);
   std::remove(tmp.c_str());
   if (rc != 0) {
