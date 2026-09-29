@@ -53,7 +53,7 @@ methodology in [`BENCHMARKS.md`](BENCHMARKS.md).
 | Benchmark | This compiler's optimization | Baseline (same compiler, flag off) | Speedup |
 |---|---|---|---|
 | matmul, 512×512 float | tiled (32×32 blocks) | naive triple loop | **1.53x** |
-| elementwise chain, 2M elements | fused (one loop) | unfused (one loop per operator) | **2.83x** |
+| elementwise chain, 2M elements | fused (one loop) | unfused (one loop per operator) | **3.15x** |
 
 Both rows are checked byte-identical in output before being timed — the optimization changes
 speed, never the result. `BENCHMARKS.md` also has honest context numbers against clang `-O2` (we
